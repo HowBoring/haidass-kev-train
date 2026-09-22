@@ -1,0 +1,39 @@
+[project]
+name = "haidass-kev-train"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch==2.14.0",
+    "transformers==5.17.0",
+    "peft==0.21.0",
+    "accelerate>=1.0",
+    "datasets>=3.0",
+    "huggingface-hub>=0.30",
+    "hf_transfer>=0.1",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "scikit-learn>=1.5",
+    "pydantic>=2.0",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+haidass-kev-train = "haidass_kev_train:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+# PyTorch wheels built against CUDA 13.2 (RTX 5090 / Blackwell sm_120).
+# explicit = true: this index serves torch only; everything else comes from PyPI.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }

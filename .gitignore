@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.whl
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Downloaded Hub resources and generated training artifacts
+models/
+data/raw/
+data/processed/
+artifacts/
+
+# Hugging Face local-dir metadata and interrupted downloads
+.cache/
+**/.cache/huggingface/
+*.aria2

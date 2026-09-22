@@ -1,0 +1,15 @@
+[model.haidass]
+repo_id = "DALabCommunity/Haidass1.5-143M"
+revision = "d8a00d4943971088e6f0f4e08fb317dd5ba33ed1"
+local_dir = "models/base/haidass1.5-143m"
+
+[data.kev_suites]
+repo_id = "jaredpalmer/kev-suites"
+revision = "a957287d1c502a4e2e3b9d9d1325c2c6f27f181c"
+local_dir = "data/raw/kev-suites"
+include = ["v4/decision-v4/*", "v6/decision-v6/*"]
+
+[data.typed_decisions]
+repo_id = "LocalLLaMA/typed-decisions"
+revision = "ea9306458d6e9563628369a3d1e72e362fb381d2"
+local_dir = "data/raw/typed-decisions"
