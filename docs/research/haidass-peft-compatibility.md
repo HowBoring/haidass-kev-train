@@ -118,8 +118,23 @@ matrix"). Verified end-to-end:
   Since we strip the head, there is no separate `lm_head` module to desynchronize — the delta lands in the
   single shared table. If the head were kept, tied propagation still applies (verified in source:
   `_get_module_names_tied_with_embedding` path).
+- **Tied-head propagation verified empirically (head-kept variant).** Wrapping the full `Qwen3ForCausalLM`
+  with `trainable_token_indices` makes PEFT wrap `lm_head` as a *tied* `TrainableTokensLayer` that shares the
+  **same `trainable_tokens_delta` ParameterDict object** as `embed_tokens.token_adapter` (verified
+  `is`-identity; source: `peft/tuners/trainable_tokens/model.py:61` in `inject_adapter`, tied-name detection in
+  `peft/utils/other.py:1752` `_get_module_names_tied_with_embedding` / `peft/tuners/tuners_utils.py:1396`).
+  Perturbing the single shared delta changed the logits (verified) — the trained rows reach the output
+  projection, not just the input side.
+- **Delta semantics (verified in source + empirically):** `TrainableTokensLayer.get_merged_weights`
+  (`peft/tuners/trainable_tokens/layer.py`, `get_merged_weights`) *replaces* the selected rows with the delta
+  (`base_layer.weight.index_copy(...)`), it does not add to them; the delta is initialized as a **copy of the
+  current rows** so the adapter is a no-op before training. After a forward touching a trainable row, the live
+  shared table row converges to the delta value (verified: row 64000 == delta bit-exact) — which is also why
+  the tied output projection sees trained rows even on the head-kept path.
 - Full construction with `trainable_token_indices=[64000..64004]` + LoRA r=16 over all 7 target projections
-  + `modules_to_save=["pointer_head"]` yields **5,036,100 trainable params** (verified count).
+  + `modules_to_save=["pointer_head"]` (a `Linear(576,256)` + `Linear(256,1)` head) yields **5,035,329 trainable
+  params** (verified count; decomposition: LoRA 4,884,480 = 30 layers × 162,816, token delta 2,880 = 5 × 576,
+  head 147,969). The head term scales with the head definition — recompute it if the head architecture changes.
 - Gradients flow to every trainable param after one backward — except the 210 `lora_A` matrices, which have
   zero grad at step 0 because `lora_B` is zero-initialized ("the LoRA B weight being set to 0. This means
   that without further training, the LoRA adapter will be a no-op" — `peft/tuners/lora/config.py:490-493`).
@@ -184,31 +199,44 @@ with torch.autocast("cuda", dtype=torch.bfloat16):
 # 7. Save: adapter-only checkpoint (adapter_config.json + adapter_model.safetensors)
 peft_model.save_pretrained(out_dir)
 
-# 8. Reload — replay steps 1-4, then:
+# 8. Reload — replay steps 1-3, RE-ATTACH the head (before from_pretrained!), then:
+backbone_rebuilt.pointer_head = PointerHead(576, 256)   # must exist before PeftModel.from_pretrained
 pm = PeftModel.from_pretrained(backbone_rebuilt, out_dir, is_trainable=True)
 ```
 
 ### Save/reload contract (verified)
 
 - `save_pretrained` writes `adapter_config.json` (with `trainable_token_indices` and
-  `modules_to_save=["pointer_head"]` preserved) plus a small `adapter_model.safetensors` — base weights are
-  never duplicated. `task_type` is `None` in the adapter config (backbone-only wrap); harmless.
-- **Reload replay contract:** the base side must be rebuilt **identically** — same tokenizer with the same
-  5 added tokens, `resize_token_embeddings(len(tok))`, same fp32 load dtype, same `PointerHead` class
-  (importable at reload time), then `PeftModel.from_pretrained(backbone, adapter_dir, is_trainable=True)`.
+  `modules_to_save=["pointer_head"]` preserved) plus `adapter_model.safetensors`. `task_type` is `None` in the
+  adapter config (backbone-only wrap); harmless.
+- **Adapter size correction (verified):** because the embedding table was resized, PEFT auto-sets
+  `save_embedding_layers=True` (runtime UserWarning) and stores the **full resized embedding table**
+  (`embed_tokens.token_adapter.base_layer.weight`, `[64005, 576]` fp32 = 36,866,880 params ≈ 147 MB) inside
+  the adapter file. Measured: `adapter_model.safetensors` ≈ **167.7 MB**, ~88% of which is the embedding
+  table. The 30 transformer layers are still not saved, but this is **not a small file** — disk/bandwidth
+  planning must expect ~168 MB per adapter checkpoint, not kilobytes.
+- **Reload replay contract (verified):** the base side must be rebuilt **identically** — same tokenizer with
+  the same 5 added tokens, `resize_token_embeddings(len(tok))`, same fp32 load dtype — and **`pointer_head`
+  must be re-attached to the rebuilt backbone BEFORE `PeftModel.from_pretrained`**:
+  `backbone.pointer_head = PointerHead(...)` first, then `PeftModel.from_pretrained(backbone, adapter_dir,
+  is_trainable=True)`. Verified failure mode: if the head is *not* attached pre-reload, the 4 head tensors
+  present in the adapter file are **silently dropped** (the `modules_to_save` wrapper has no target module to
+  wrap; no warning is emitted), the trainable count drops to 4,887,360, and the trained head is lost.
+  With the head attached pre-reload, the trained head weights are restored **bit-exactly**
+  (`torch.equal` against the adapter file) and trainable params return to the full **5,035,329**.
 - **`is_trainable=True` is required to resume training.** Verified: default reload yields **0 trainable
-  params** (inference-only); `is_trainable=True` restores the full 555,840 trainable params (LoRA + token
-  delta + head).
+  params** (inference-only); `is_trainable=True` restores LoRA + token delta + head (4,887,360 without the
+  head module; 5,035,329 with it).
 - Round-trip fidelity: hidden states match to `maxdiff = 0.00e+00`; `trainable_tokens_delta` and head weights
   restored bit-exactly. **Optimizer state is NOT saved by `save_pretrained`** — for mid-training resume, use
   Trainer/accelerate checkpointing on top; do not treat the adapter dir as a full training checkpoint.
 
 ### Uncertainties / not covered here
 
-- The `pointer_head` reload path requires `modules_to_save` and an importable class; if the head class moves,
-  PEFT falls back to constructing a fresh (random) head on `PeftModel.from_pretrained` — the trained head
-  weights live only in the adapter checkpoint. [INFERENCE from `modules_to_save` semantics,
-  `peft/tuners/lora/config.py:488-489`]
+- The `pointer_head` reload path requires `modules_to_save` and an importable class; the head must be
+  re-attached to the rebuilt backbone before `PeftModel.from_pretrained` (verified above). If the head class
+  moves between save and reload, the trained head weights live only in the adapter checkpoint and would not
+  be restored. [INFERENCE from `modules_to_save` semantics, `peft/tuners/lora/config.py:488-489`]
 - CUDA-autocast numerics were verified for dtype bookkeeping only; no CUDA GPU was available for this probe
   (CPU-only verification of master-weight fp32 preservation + the bf16-base crash). CUDA parity is a
   one-line check in the first real training run.
@@ -221,30 +249,37 @@ pm = PeftModel.from_pretrained(backbone_rebuilt, out_dir, is_trainable=True)
    neither is currently in `uv.lock`.
 2. **Pass `dtype=torch.float32` explicitly at load** — transformers 5.x defaults to the checkpoint's bf16;
    the plan's FP32-master design silently degrades to bf16 otherwise, and a fp32 head attached to the bf16
-   backbone crashes outright.
+   backbone crashes outright (`RuntimeError: mat1 and mat2 must have the same dtype`, re-verified).
 3. **Wrap the backbone (`model.model`), not the causal-LM wrapper, with `get_peft_model`** — matches the plan
    ("strip lm_head"), but note the head-strip must happen *before* PEFT wrap and the backbone's
    `tie_word_embeddings` flag must stay `true` for PEFT's tied-token propagation.
-4. **Reload with `is_trainable=True`** — the default reload is inference-only (0 trainable params).
-5. No deviation needed for `trainable_token_indices`, LoRA target modules, tied-embedding resize, or the
+4. **Reload with `is_trainable=True` and the head attached pre-reload** — the default reload is
+   inference-only (0 trainable params), and a missing head module silently drops the saved head weights.
+5. **Plan adapter checkpoints at ~168 MB, not "small"** — the auto-`save_embedding_layers` behavior stores the
+   full resized fp32 embedding table in every adapter checkpoint (§8).
+6. No deviation needed for `trainable_token_indices`, LoRA target modules, tied-embedding resize, or the
    mean-resizing default — all work as planned.
 
 ## 10. Primary-source index
 
 | Claim | Source |
 |---|---|
-| Architecture, vocab, tied embeddings, bf16, 4096 ctx | local `config.json`; [model card](https://huggingface.co/DALabCommunity/Haidass1.5-147M) |
-| No `lm_head` tensor; stock Qwen3 module names | local `model.safetensors` header (332 tensors inspected) |
+| Architecture, vocab, tied embeddings, bf16, 4096 ctx | local `config.json`; [model card](https://huggingface.co/DALabCommunity/Haidass1.5-143M) |
+| No `lm_head` tensor; stock Qwen3 module names | local `model.safetensors` header (332 tensors inspected, plus `__metadata__`) |
 | Tokenizer class/legacy, 131072 max length | local `tokenizer_config.json` |
 | Tokenizer needs protobuf/tiktoken fallback chain | `transformers/tokenization_utils_tokenizers.py:227-288`; reproduced error |
 | Resize API + `mean_resizing=True` default | `transformers/modeling_utils.py:2629-2665` |
 | Resize re-ties head; resizes output embeddings on causal-LM wrapper | `transformers/modeling_utils.py:2688-2717` |
 | Default load dtype = checkpoint dtype | verified (`from_pretrained` no-dtype → all-bf16 params) |
+| PEFT casts adapter/delta params to fp32 on a bf16 base | verified (bf16 load → lora + delta fp32, base bf16) |
 | `trainable_token_indices` support + FSDP caveat | `peft/tuners/lora/config.py:781-794` |
+| Tied-head delta propagation (shared delta object; logits-sensitive) | verified; `peft/tuners/trainable_tokens/model.py:61`; `peft/utils/other.py:1752`; `peft/tuners/tuners_utils.py:1396` |
+| Delta replacement semantics + row-convergence after forward | verified; `peft/tuners/trainable_tokens/layer.py` `get_merged_weights` |
+| Adapter file stores full resized embedding table (~168 MB) | verified (safetensors keys + size; `save_embedding_layers` UserWarning) |
 | `ensure_weight_tying` default False; tied propagation | `peft/tuners/lora/config.py:989-1001`; `peft/utils/other.py:1567-1670` |
 | LoRA B zero-init (no-op before training) | `peft/tuners/lora/config.py:490-493` |
 | `modules_to_save` semantics | `peft/tuners/lora/config.py:488-489` |
-| Reload needs `is_trainable=True` (0 trainable otherwise) | verified (5.04M → 0 vs 555,840 trainable params) |
+| Reload needs `is_trainable=True` + head attached pre-reload | verified (0 vs 4,887,360 vs 5,035,329 trainable params) |
 | Autocast preserves fp32 masters | [PyTorch autocast docs](https://pytorch.org/docs/stable/amp.html#autocasting); verified param dtypes after autocast fwd/bwd |
 | FP32-master plan section | repo `docs/chatgpt/Haidass-Kev-Train-Analysis.md:1921-1936` |
 | Construction-order plan section | repo `docs/chatgpt/Haidass-Kev-Train-Analysis.md:1833-1860, 2110-2144` |
