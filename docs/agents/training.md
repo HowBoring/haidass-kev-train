@@ -1,0 +1,226 @@
+# Training system
+
+Read this before changing data rendering, attention masks, model construction, trainable parameters, losses, augmentation, calibration, or evaluation. The full design source is `docs/chatgpt/Haidass-Kev-Train-Analysis.md`: architecture and data are roughly lines 14–1500; RLCD is roughly lines 2354–3250; the training plan and experiment matrix are roughly lines 3254–3679.
+
+Before designing another decision-v7 SFT scheduler/budget run, typed-decisions Stage-2 objective comparison, or Kev ID/OOD evaluation, read the [completed experiment record](../experiments/2026-09-23-decision-v7-stage2.md) for controls, observed tradeoffs, and entry gates.
+
+## Architecture contract
+
+A training item contains one shared state and typed questions: `noul`, `choice`, or ordinal `score`. Pack the state and all question branches into one forward pass. The block-causal mask lets every branch attend to the state while isolating branches from each other.
+
+Render five logical structural markers by inserting explicitly mapped existing token IDs:
+
+| Logical marker | Existing tokenizer token | ID |
+|---|---|---|
+| `<|kev_state|>` | `<|object_ref_start|>` | 6 |
+| `<|kev_question|>` | `<|object_ref_end|>` | 7 |
+| `<|kev_option|>` | `<|box_start|>` | 8 |
+| `<|kev_option_end|>` | `<|box_end|>` | 9 |
+| `<|kev_decide|>` | `<|quad_start|>` | 10 |
+
+The pinned tokenizer does **not** contain the literal Kev spellings as single tokens.
+The user selected reuse of existing special-token IDs rather than vocabulary expansion.
+These five visual/reference delimiters are repurposed for this text-only Decision Model;
+do not use chat/vision rendering or allow their literal spellings inside input text.
+Insert mapped IDs directly and persist both logical names and tokenizer spellings in artifacts.
+
+The primary model is the Haidass Qwen3 backbone with its language-model head removed, LoRA on `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, and `down_proj`, and a pointer head mapping hidden size 576 to dimension 256. `training_mode="full"` instead trains the complete backbone and pointer head without PEFT. Both modes expose `DecisionModel.pointer_head` and score options from the `<|kev_decide|>` and `<|kev_option_end|>` representations with scaled dot products; neither generates text.
+
+Use PyTorch SDPA with an additive `[B, 1, L, L]` block-causal mask. Phase 1 uses this path exclusively because flash-attn, xformers, bitsandbytes, DeepSpeed, and FSDP do not provide the required arbitrary branch mask. Run forward and backward under BF16 autocast while keeping FP32 master weights for LoRA, the pointer head, and special-token embeddings; keep the model's stored parameters out of permanent BF16 casting.
+
+## Decision Model interface
+
+`PackedDecisionBatch` carries `input_ids [B,L]`, reset-aware `position_ids [B,L]`, BF16 additive `attention_bias [B,1,L,L]`, `decide_positions [B,Q]`, `option_end_positions [B,Q,K]`, `question_mask [B,Q]`, `option_mask [B,Q,K]`, optional FP32 `target_probs [B,Q,K]`, and CPU metadata (`record_id`, `question_name`, `question_type`, `src`, `group_id`, `variant`). Hard labels become one-hot `target_probs`; soft targets remain intact.
+
+State positions increase normally. Every question branch restarts at the state length. Question branches remain isolated from one another, but options inside a question stay in one causal sequence: later options may attend to earlier options and keep sequential positions. Do not enable Kev's `option_isolation`/shared-option-position mode for the primary run; its exact permutation invariance produced no gain at 0.6B and reduced 4B transfer accuracy to 0.729, a significant 5.8-point loss. A branch attends to the full state and its own causal history; state tokens never attend to branches. The model supports the backbone limit of 4096 tokens. Kev v4/v6 packing retains `max_packed=2048` and rejects overflow instead of truncating.
+
+`DecisionModel.forward(batch)` returns only BF16 option logits shaped `[B,Q,K]`. Invalid options of valid questions are `-inf`; invalid question rows are zero and excluded by `question_mask`. `option_distribution(logits, option_mask, temperature=1)` casts logits to FP32 before masking, temperature scaling, and softmax.
+
+Objectives remain outside the model. CE, proper losses, and RLCD return per-question values `[B,Q]` plus a valid mask; the shared reducer averages all valid questions equally. The model never selects an objective or returns a scalar loss.
+
+## Construction order
+
+Preserve this order for the LoRA arm; the full arm keeps the directly attached backbone/head trainable instead of applying PEFT:
+
+1. Resolve the five mapped tokenizer spellings above, assert each encodes as its expected single existing ID, and keep the logical Kev names separate from tokenizer text.
+2. Keep tokenizer length and the input embedding matrix unchanged; do not add tokens or resize embeddings.
+3. Load `AutoModelForCausalLM` with explicit FP32 weights and retain `model.model` as the Qwen3 backbone, removing the language-model head from the Decision Model.
+4. Attach the FP32 PointerHead to the backbone before PEFT wrapping.
+5. Apply PEFT LoRA with rank 16, alpha 32, dropout 0.05, the seven projection targets, the five reused IDs in `trainable_token_indices`, and `modules_to_save=["pointer_head"]`.
+6. Put LoRA parameters, PointerHead parameters, and the five reused token rows in the optimizer.
+
+Completion criterion: tokenizer length and embedding shape remain unchanged; every trainable group receives gradients and an optimizer update; save/reload preserves token IDs and decision outputs. In LoRA mode, non-selected embedding rows remain unchanged and adapted rows are restored exactly. Rebuild and attach the PointerHead before `PeftModel.from_pretrained`; otherwise PEFT can silently drop its saved weights.
+
+## Artifact and checkpoint contract
+
+A Decision Model Artifact contains `decision_model.json` and mode-specific FP32 weights. Existing LoRA v1 artifacts remain PEFT-native adapter directories; full artifacts declare `training_mode="full"` and store the backbone and pointer head in `model.safetensors`. The manifest pins the base revision, tokenizer, five marker mappings, architecture, and dtype. Loading rejects mismatched manifests, incomplete states, or non-FP32 weights. Evaluation loads freeze every parameter; training loads restore the mode's trainable set. Artifact hashes cover the relevant mode-specific files.
+
+A Training Checkpoint additionally stores optimizer, scheduler, scaler, global step, data cursor, and Python, NumPy, PyTorch CPU, and PyTorch CUDA RNG states. Resume requires an exact resource and training-configuration match so baseline branches can start from the same SFT state.
+
+Temperature fitting produces a separate Calibration Artifact bound to the Decision Model Artifact hash and calibration-split identity. It never mutates the model artifact.
+
+## Training contract
+
+Stage 1 is supervised decision training with cross-entropy over the pointer distribution. Preserve full soft targets when present; hard labels become one-hot targets.
+
+Stage 2 inherits the complete Stage 1 checkpoint and optimizes supervised CE plus Laya-style RLCD and Stage 1 replay. RLCD perturbs logits with Gaussian noise and uses a group-mean-baseline score-function estimator; it is not token rollout or PPO.
+
+Fit temperature only after training on an independent calibration split. Report raw and temperature-scaled probabilities separately.
+
+Compare objectives from the same SFT checkpoint with the same data, trainable parameters, replay policy, and update budget:
+
+- A: SFT checkpoint only.
+- B: continued CE.
+- C: CE plus directly differentiated proper-scoring loss.
+- D: CE plus RLCD.
+
+## Data invariants
+
+- Permute `target` with its options. A changed option order with a stale target is invalid.
+- Adding or removing options requires a newly defined target distribution.
+- Do not apply arbitrary option permutations to ordinal `score` questions.
+- Keep all questions and augmentations from one case in the same split.
+- Use an independent calibration split; training data cannot also calibrate temperature.
+- Report accuracy, NLL/Brier, ordinal RPS/MAE, option-reordering stability, and Stage 1 capability retention.
+- State, instructions, and criterion descriptions may be structured JSON. Render nested fields
+  faithfully rather than assuming every description or instruction is a string.
+
+## Resources
+
+Pinned Hub revisions and local destinations are authoritative in `configs/resources.toml`. Download them with `scripts/download_resources.sh`.
+
+The next-round frozen suite is `data/raw/kev-suites/v7/decision-v7/`; `v4/transfer-v4/` remains evaluation-only. The earlier v4/v6 suites remain available for existing experiments. Verify JSONL files against each suite's `manifest.json`. Soft-label workflow data is under `data/raw/typed-decisions/`.
+
+## Running Stage 1
+
+Use `uv run --no-sync python -m haidass_kev_train.training.sft --config configs/training/decision-v7.toml --output artifacts/checkpoints/decision-v7`.
+The executable `haidass-kev-train` invokes the same trainer. The full-backbone arm uses
+`decision-v7-full.toml`; the no-augmentation control uses `decision-v7-unaugmented.toml`.
+These presets hold the v7 source selection fixed. Typed-decisions is not mixed into Stage 1.
+
+Online augmentation is keyed by seed, epoch, and record ID, not global RNG or traversal order.
+Choice permutations preserve keyed/list soft targets. Added distractors receive zero target
+mass; removed mass transfers to explicit none. None-present/absent siblings retain group
+identity. Ineligible binary choices skip correct-none replacement; ordinal score order is
+unchanged. All switches off plus `shuffle=false` returns an unchanged baseline.
+Epochs rebuild augmented encodings; the fixed update budget is not a promise of an exact
+number of raw-data passes. Question-equal CE normalization spans the whole accumulation group.
+
+`scripts/check_adaptation.py` checks real CUDA gradients, frozen rows, branch isolation and
+artifact round trips. BF16 GEMM rounding changes with packed shape: test same-shape sibling
+perturbations for exact isolation and use FP32 for packed-versus-separate equivalence.
+`scripts/profile_adaptation.py` measures actual median/maximum packed lengths; it does not
+claim throughput or memory bounds for unseen lengths. `scripts/check_resume.py` compares
+interrupted and uninterrupted pilot runs, including optimizer, scheduler, RNG and data cursor.
+
+The pilot config is `configs/training/pilot.toml`. `--stop-after N` pauses after N additional
+updates without changing the training budget. Resume with the same config/output and
+`--resume <checkpoint-directory>`. Checkpoint writes are atomic; existing checkpoint directories
+are never overwritten. Resume rejects resource, configuration and runtime-policy changes.
+BF16 needs no loss scaler; its checkpoint entry is explicitly `None`. CUDA determinism and the
+cuBLAS workspace policy are fixed for reproducible resume, with FP32 master parameters.
+
+`learning_rate` controls the backbone/adapters; `head_learning_rate` controls the pointer head.
+Logs record each group's effective LR and pre-clip gradient norm. Changing a budget or LR
+requires a new run, never a modified resume configuration. To plan a finite comparison:
+
+`scheduler = "cosine"` preserves the warmup-plus-cosine schedule; `warmup_steps` must remain
+below the update budget. `scheduler = "onecycle"` uses PyTorch `OneCycleLR` with the backbone
+and head learning rates as `max_lr`, `total_steps = max_steps`, and `pct_start = 0.1`; its
+documented defaults supply cosine annealing and momentum cycling. Set `warmup_steps = 0`
+because OneCycle owns its warmup. Scheduler state is checkpointed and restored on resume.
+`decision-v7-onecycle.toml` is the scheduler-only v7 comparison preset.
+
+
+```bash
+uv run --no-sync python -m haidass_kev_train.training.experiments \
+  --config configs/training/decision-v7.toml --output artifacts/comparisons/v7 \
+  --budgets 2190 4380 --learning-rates 0.00005 --modes lora full --seeds 42 --plan-only
+```
+
+Omit `--plan-only` to execute the explicit arms serially. The comparison refuses existing
+outputs and budgets incompatible with the configured warmup. Each arm records its resolved
+configuration, provenance, and selected development checkpoint; no test-based promotion occurs.
+
+### Optional W&B tracking
+
+Set `WANDB_ENTITY` to the stable team name. Pass `--wandb-project <project>` to
+the Decision SFT, Stage 2, or experiment-comparison command to enable W&B;
+`--wandb-name <name>` optionally names an individual SFT/Stage 2 run. A standalone
+run defaults to its output-directory name; comparison arms use their distinct
+arm names and share a comparison group. Without `--wandb-project`, no W&B
+credentials or network are needed. Use `WANDB_API_KEY` or an existing W&B login
+for online uploads.
+
+W&B mirrors aggregate training metrics and evaluation reports, plus pre-clip
+histograms of trainable backbone (LoRA or full) and pointer-head gradients only
+at scheduled development evaluations. It does not upload samples, per-record
+predictions, model weights, checkpoint files, or captured console output.
+`metrics.jsonl` remains authoritative. The run ID is stored in `wandb-run.json`
+under the training output directory and reused when resuming with the same
+output, entity, and project. W&B upload errors do not stop local training.
+
+## Evaluation Lane
+
+At each evaluation interval, score a fixed, group-preserving probe drawn only from training
+and the complete development split. Probe IDs are logged; selection is independent of input
+record order. Diagnostics preserve model mode and Python/NumPy/torch RNG state, report raw
+temperature-1 all/clean aggregates, task metrics, policy-pair behavior, and key-aligned Choice
+reordering. Pair rates include denominators and incomplete counts; no pairs means null rates.
+
+`development_selection` explicitly chooses `clean` or `all`; the v7 presets select the lowest
+clean macro-NLL. Probe metrics never select checkpoints. `metrics.jsonl` stores `train_probe`
+and `development` reports, and `best.json` points to the selected complete checkpoint.
+Pausing off cadence does not introduce an extra selection evaluation.
+
+After selecting the checkpoint, invoke `python -m haidass_kev_train.evaluation.run` with
+`--artifact`, `--suite`, `--split`, `--calibration-out`, `--out`, and optionally
+`--reorder-stability`. Use the same frozen suite as the training configuration, with transfer-v4 reported separately by the official comparison runner.
+Fit temperature only on the manifest-verified `calibration` split; bind it to the portable
+artifact hash and split identity. Raw and calibrated reports remain separate.
+Option reversal preserves choice targets and excludes ordinal score questions.
+Reports include accuracy, NLL/Brier, ordinal RPS and expected-index MAE, source/type breakdowns,
+and choice reversal stability. Nonfinite valid logits and invalid targets are hard errors.
+
+CPU preparation may overlap training. GPU evaluation is serialized with training on the
+single 5090. Do not evaluate the locked test before checkpoint selection, or interpret a
+four-update pilot's scores as SFT Complete or as evidence for RLCD entry.
+
+## Running Stage 2
+
+Prepare the pinned aggregate typed-decisions TRAIN file with
+`uv run --no-sync python -m haidass_kev_train.training.typed_decisions --output data/processed/typed-decisions-stage2`.
+The workflow-stratified, case-disjoint split is 960 training, 120 development,
+and 120 calibration cases; all five questions remain together. Preparation checks
+packed lengths and rejects overflow. It never reads the official test file.
+
+Run `python -m haidass_kev_train.training.stage2 --config configs/training/stage2-b-ce.toml --parent <stage1-checkpoint> --output <empty-output>`.
+Use `stage2-c-proper.toml` and `stage2-d-rlcd.toml` for the other controlled arms.
+All arms retain current-data CE and separately question-normalized Stage 1 replay.
+Only the additional objective differs: none, directly differentiated proper loss,
+or Gaussian logits-space RLCD. The reward combines clipped log score, spherical
+score and ordinal-only normalized RPS. Hard and full soft targets are supported.
+
+`--parent` inherits Stage 1 model weights, Adam moments/step counters and global
+RNG, but uses fresh Stage 2 optimizer hyperparameters, scheduler and data streams.
+`--resume <stage2-checkpoint>` instead restores the exact Stage 2 optimizer,
+scheduler, both data cursors, global RNG and dedicated RL-noise RNG. Parent hashes
+and the transition policy are recorded. LoRA/full mode is inherited, not converted.
+
+RLCD samples and advantages are detached; the live centered logits parameterize
+the Gaussian score-function density in the valid-option K-1 subspace. The
+self-inclusive group baseline has a (G-1)/G gradient scale with normalization off;
+the default advantage normalization is per microbatch over eligible entries.
+Padding and singleton questions contribute no RL term. A separate noise generator
+keeps the data/dropout RNG stream aligned across arms.
+
+`best.json` selects solely on raw typed-development NLL. Stage 1 retention and OOD
+reports are diagnostics, not selection criteria. Fit temperature separately on
+calibration, report raw metrics too, and distinguish teacher agreement from
+real-world probability calibration. A technical RLCD experiment does not imply
+the SFT policy-capability entry gate has passed.
+
+`scripts/evaluate_official.py` evaluates development only by default.
+`--include-locked-test` is an explicit final-promotion opt-in, never for exploration.
+The focused real-CUDA handoff/resume check is
+`uv run --no-sync python tests/test_stage2.py Stage2CudaIntegrationTests.test_real_handoff_singleton_logging_and_exact_resume`.
