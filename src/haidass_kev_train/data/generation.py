@@ -13,7 +13,7 @@ import urllib.request
 
 BASE_URL = "http://110.123.0.3:8000/v1"
 MODEL = "qwen3.8-27b"
-PROMPT_VERSION = "ufw-finemath-canonical-v2"
+PROMPT_VERSION = "ufw-finemath-canonical-v3"
 MAX_RESPONSE_BYTES = 1 << 20
 
 

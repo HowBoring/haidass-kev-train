@@ -178,7 +178,7 @@ select checkpoints.
 uv run --no-sync python -m haidass_kev_train.training.sft --config <canonical-config.toml> --output <output>
 ```
 
-### Offline UFW and FineMath builder (tickets #23–25)
+### Offline UFW and FineMath builder (tickets #23–26)
 
 The public library entry is `haidass_kev_train.data.build.build(config: dict, output: Path | str) -> dict`.
 It streams original UFW `ultrafineweb_{en,zh}_l3/qa/*.parquet` and FineMath-4+
@@ -258,19 +258,48 @@ rejections. Screening remains model judgement, not proof or human certification.
 FineMath extracts at most one labelled existing problem and final answer per webpage;
 original character spans, raw-text hash, URL and snapshot identify and trace it.
 A nonempty pre-question prefix must be retained as original-text givens or
-rejected; an assisted final-answer span cannot stop inside the original answer.
-Worked solutions, including unlabelled derivations after the question, do not enter
-model-visible state or question. Exact rational checks cover signed numbers,
-finite decimals, scientific notation, fractions, percentages, fixed-ratio
-length/area/volume/mass/time and finite compound
-units such as speed. All 15 answer pairs are checked; known equivalences and
-dimensionally mismatched distractors reject. Programmatic unknown is counted
-and rejected, **not** passed as an established difference or labelled verified.
-Ticket #26 extends this bounded numeric/unit path with short symbolic/algebraic
-results, finite solution sets and independent same-model LLM adjudication of
-in-scope unknowns; this trial is not a permanent numeric-only FineMath policy.
-Absolute temperature, exchange rates, month lengths and missing conditions
-remain excluded, without LLM override.
+rejected; worked solutions, including unlabelled derivations after the
+question, do not enter model-visible state or question. Source gold is
+preserved, not regenerated or mathematically proved.
+
+The bounded programmatic checker accepts exact signed integers, finite decimals,
+scientific notation, fractions, percentages, short case-sensitive identifier
+expressions with parentheses, arithmetic, bounded integer powers and square
+roots, and explicit finite solution sets (`x=±2`, `{-2,2}`). `x=...` is
+interpreted as an answer value, never a request to solve for missing gold.
+Finite sets remain whole answers: one root is not a substitute for both.
+An explicit finite set among scalar candidates (in either direction) is an
+answer-type mismatch rejected before adjudication, even when values differ.
+Fixed-ratio units are mm/cm/m/km, mg/g/kg, ms/s/min/h and mL/L, including
+squared/cubed length and finite compound dimensions such as m/s and km/h.
+The implementation bounds answer length, parser depth/nodes, exponents and
+calculation; arbitrary executable code and unrestricted symbolic parsing are
+not allowed. Exact known equivalence among any of all 15 candidate pairs,
+dimension mismatch, hostile/out-of-scope syntax and prohibited conversions
+reject without an LLM call. Expressions needing unstated domain assumptions,
+undefined division or square-root branch claims are not silently equated or
+declared distinct. Absolute temperature, exchange rates, month lengths,
+missing figures and necessary conditions remain excluded.
+
+If any pair is undecided but remains inside the admitted scope, a *single*
+independent `finemath_adjudicate` task sends original problem conditions,
+source gold and all six candidate texts to the same pinned model with
+thinking enabled. It does not send construction self-assessment. Strict final
+JSON must explicitly approve answer-type validity and non-equivalence for
+each of the 15 pairs; rejection, uncertainty, equivalent/unknown pair, or
+invalid output after at most two same-task retries rejects the sample.
+Service/configuration failure stops the trial under the shared attempt/time
+budget, not as bad source data. Records needing this path bear
+`finemath_llm_adjudicated`, rather than `finemath_programmatic`. The
+summary records `validation_paths` (accepted by path), `unknown_cases`,
+`program_rejected` (FineMath hard/structural rejections excluding malformed
+generation), `llm_accepted`, `llm_rejected`, rejection reasons and all request
+attempts. Manifest `build.thinking` fixes the adjudication task policy and
+`build.prompt_version` fixes prompt identity.
+Neither same-model independent adjudication nor controlled HTTP verification
+is a mathematical proof or source quality certification: correlated errors
+remain possible and the first admitted batch needs source-grounded human
+review before scaling.
 
 The suite reports rejection/unknown/program-relation counts, attempts, source and
 split distributions, and source-URL groups assigned before filtering. Grouping

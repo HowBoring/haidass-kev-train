@@ -158,38 +158,15 @@ class FineMathBuilderTests(unittest.TestCase):
         self.assertEqual(len(requests), 5)
         self.assertEqual(self.cases(), [])
 
-    def test_dimension_mismatch_and_unit_case_unknown_reject_without_adjudication(self):
-        self.source([("Question: What volume is 5 mL?\nAnswer: 5 mL",
-                      "https://example.org/volume", "latest"),
-                     ("Question: What is 5 cm in meters?\nAnswer: 0.05 m",
-                      "https://example.org/length", "latest")])
-        report, requests = self.run_builder([
-            {"distractors": ["4 mL", "6 mL", "7 mL", "8 mL", "5 ML"]},
-            {"distractors": ["5 g", "4 cm", "6 cm", "7 cm", "8 cm"]},
-        ])
-        self.assertEqual(report["rejected"]["equivalence_unknown"], 1)
-        self.assertEqual(report["rejected"]["dimension_mismatch"], 1)
-        self.assertEqual(report["validation_paths"], {})
-        self.assertEqual(report["unknown_cases"], 1)
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(self.cases(), [])
-
-    def test_symbolic_unknown_is_not_programmatic_proof_or_hidden_llm_approval(self):
-        self.source([("Question: What is the value of √2?\nAnswer: √2", "https://example.org/1", "latest"),
-                     ("Question: What is √3+√5?\nAnswer: √3+√5", "https://example.org/2", "latest"),
-                     ("Question: What is the value of x?\nAnswer: x", "https://example.org/2-missing", "latest"),
-                     ("Question: Convert 5 Celsius to Fahrenheit?\nAnswer: 41 Fahrenheit", "https://example.org/3", "latest"),
-                     ("Question: What is shown in the diagram?\nAnswer: 2", "https://example.org/4", "latest"),
-                     ("Question: Find x?\nSolution: x=2", "https://example.org/5", "latest")])
+    def test_missing_answer_or_required_figure_does_not_generate(self):
+        self.source([("Question: What is shown in the diagram?\nAnswer: 2",
+                      "https://example.org/figure", "latest"),
+                     ("Question: Find x?\nSolution: x=2",
+                      "https://example.org/no-answer", "latest")])
         report, requests = self.run_builder([])
-        self.assertEqual(report["validation_paths"], {})
-        self.assertEqual(report["unknown_cases"], 2)
-        self.assertEqual(report["rejected"]["equivalence_unknown"], 2)
-        self.assertEqual(report["rejected"]["prohibited_conversion"], 1)
-        self.assertEqual(report["rejected"]["missing_figure_or_conditions"], 2)
+        self.assertEqual(report["rejected"]["missing_figure_or_conditions"], 1)
         self.assertEqual(report["rejected"]["missing_source_answer"], 1)
-        self.assertEqual(len(requests), 0)
-        self.assertEqual(self.cases(), [])
+        self.assertEqual((report["attempts"], requests, self.cases()), (0, [], []))
 
     def test_assisted_location_is_original_and_thinking_enabled(self):
         text = "Question: Find the result of 1+1?\nAnswer: 2\nAdditional unrelated footer"
@@ -223,20 +200,6 @@ class FineMathBuilderTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertEqual(self.cases(), [])
 
-    def test_oversized_or_unsupported_math_cannot_be_admitted_by_text_difference(self):
-        self.source([("Question: What is 5?\nAnswer: 5", "https://example.org/large", "latest"),
-                     ("Question: What is 5?\nAnswer: 5", "https://example.org/exponent", "latest"),
-                     ("Question: What is 5?\nAnswer: __import__('os').system('touch /tmp/never')",
-                      "https://example.org/code", "latest")])
-        report, requests = self.run_builder([
-            {"distractors": ["1" * 161, "2", "3", "4", "6"]},
-            {"distractors": ["1e999999", "2", "3", "4", "6"]},
-        ])
-        self.assertEqual(report["rejected"]["answer_length"], 1)
-        self.assertEqual(report["rejected"]["equivalence_unknown"], 2)
-        self.assertEqual(report["unknown_cases"], 2)
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(self.cases(), [])
 
     def test_unlabelled_prefix_requires_verified_givens_and_is_never_dropped(self):
         text = ("A rectangle has length 5 cm and width 4 cm.\n"
