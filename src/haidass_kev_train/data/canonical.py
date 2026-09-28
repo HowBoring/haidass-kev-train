@@ -178,8 +178,6 @@ def validate_record(record: object) -> None:
             value = source_ref.get(name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"{rid}: FineMath source_ref.{name} must be a non-empty string")
-        if source_ref.get("url") is None and source_ref.get("snapshot_type") is None:
-            raise ValueError(f"{rid}: FineMath source_ref must preserve the available url or snapshot identity")
         _span_field(source_ref, rid, "givens_span", False)
         _span_list_field(source_ref, rid, "option_spans", False)
     else:

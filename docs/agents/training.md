@@ -178,21 +178,22 @@ select checkpoints.
 uv run --no-sync python -m haidass_kev_train.training.sft --config <canonical-config.toml> --output <output>
 ```
 
-### Offline UFW short-answer builder (ticket #23)
+### Offline UFW and FineMath builder (tickets #23–25)
 
 The public library entry is `haidass_kev_train.data.build.build(config: dict, output: Path | str) -> dict`.
-It streams **original** `ultrafineweb_{en,zh}_l3/qa/*.parquet` locally and publishes
-`train.jsonl`, `development.jsonl`, `summary.json`, then `manifest.json` as one atomic
-directory rename. The train/development files contain canonical records only; load with
-`load_canonical_suite(path, split)`. Never point it at `qa_cleaned/` or `multi_style/`.
+It streams original UFW `ultrafineweb_{en,zh}_l3/qa/*.parquet` and FineMath-4+
+`*.parquet` (original `text`/`url`/`snapshot_type` rows) locally; it publishes
+`train.jsonl`, `development.jsonl`, `summary.json`, then `manifest.json` with
+one atomic directory rename. Load canonical records with `load_canonical_suite(path, split)`;
+never point UFW at `qa_cleaned/` or `multi_style/`.
 
 Example bounded configuration (paths must exist; choose an unused output directory):
 
 ```toml
 seed = 42
 split_seed = 42
-target = 2
-max_attempts = 6
+target = 3
+max_attempts = 12
 max_seconds = 180
 timeout = 30
 tokenizer_path = "models/base/haidass1.5-143m"
@@ -206,28 +207,33 @@ max_output_tokens = 512
 [sources]
 ufw-en = "/mnt/data/Ultra-FineWeb-L3/data/ultrafineweb_en_l3/qa"
 ufw-zh = "/mnt/data/Ultra-FineWeb-L3/data/ultrafineweb_zh_l3/qa"
+finemath = "/mnt/data/finemath-4plus/finemath-4plus"
 
 [source_targets]
 ufw-en = 1
 ufw-zh = 1
+finemath = 1
+
 ```
 
 ```bash
 uv run --no-sync python -m haidass_kev_train.data.build \
-  --config <build.toml> --output data/processed/ufw-short-answer-trial
+  --config <build.toml> --output data/processed/ufw-finemath-trial
 ```
 
 This command **does call** `http://110.123.0.3:8000/v1/chat/completions` with exact model
 `qwen3.8-27b`; obtain authorization before running it, even with small bounds. Optional
 `api_key_env = "YOUR_ENV_VAR_NAME"` refers to an environment variable, never a key in the
-config/artifact. HTTP is not confidential transport; only the selected state/question/
-source answer and screening candidates are sent, not the complete corpus. The first
+config/artifact. HTTP is not confidential transport; only the current row's bounded
+material and screening candidates are sent, not the complete corpus. The first
 real-source call requires a separately authorized minimal non-sensitive service probe
-for final JSON, thinking=false, usage and truncation; API metadata alone does not verify it.
-All UFW requests explicitly disable thinking. The Haidass tokenizer checks all six
-training candidates, while the separately pinned Qwen tokenizer and its rendered chat
-template measure each generator request against the context limit **including**
-`max_output_tokens` reserved for the answer; no source is truncated. Their local file
+for final JSON, task-specific thinking, usage and truncation; API metadata does not verify it.
+UFW location, cleanup, construction and screening explicitly disable thinking;
+FineMath assisted extraction and candidate construction explicitly enable it.
+The Haidass tokenizer checks all six training candidates;
+the separately pinned Qwen tokenizer and its rendered chat template measure each
+generator request against the context limit **including** `max_output_tokens`
+reserved for the answer; no source is truncated. Their local file
 hashes are frozen in the manifest. The Qwen path shown above is the local default;
 set it explicitly elsewhere, with its tokenizer and chat template present. Default
 ceilings are 100 accepted, 2000 requests **including failures/retries**, and four hours;
@@ -235,23 +241,46 @@ CLI smaller bounds cannot increase those trial ceilings. HTTP bodies are bounded
 1 MiB and each attempt has a total wall deadline. A timed-out daemon request may
 continue remotely; `in_flight_requests` reports still-running local attempts.
 
-The current conservative recovery accepts contiguous terminal English/Chinese
-`Question/Answer` or `问题/答案` short-answer annotations (including Q+A on the same line);
-it rejects uncertain boundaries, generator chat-role delimiter collisions and old
-multiple-choice/presentation-dependent forms.
-Assisted original-text location, original choice answer mapping and permissible
-presentation conversion belong to ticket #24. Only one cheaply eligible QA is selected
-per row by seed and stable source identity; rejection does not switch to another QA.
-Two bounded requests construct and independently screen source support, unique gold,
-wrongness and format. This is **model screening**, not a semantic proof or human data
-quality certification. Original source spans/hash and uid/row locator are persisted
-and checked. Same-document Source Groups are split 95/5 before requests; missing
-development or target coverage stays `complete=false`, never repaired by moving groups.
-Review `summary.json` for rejections, requests/usage, in-flight attempts, source
-counts, groups/splits, lengths and stop reason; `manifest.json` SHA/count verifies
-readable files even when a trial is explicitly incomplete.
-Neither a controlled HTTP test nor an incomplete suite
-is evidence of real service behavior, data quality, or readiness for Data Scaling.
+UFW bounds the raw original content before parsing or assisted dispatch and
+recovers original short-answer and original-choice questions deterministically
+first. Ambiguous structure can request `ufw_locate`; assisted character spans,
+raw text, field attribution and source hash are checked before selecting one
+cheap eligible QA per row by seed and stable identity. The selected QA cannot fall back
+to a different QA on rejection. Unambiguous old option letters map to the original
+option text, with `mcq` and original `option_spans` retained in Source Trace;
+only presentation count/list wording can be removed. When necessary,
+`ufw_cleanup` can request a presentation-only rewrite, checked against allowed
+substitutions. Both assisted calls consume the same finite request/time budget as
+candidate generation and screening. `assisted_location`,
+`answer_mapping_ambiguous`, and `presentation_conversion` denote distinct
+rejections. Screening remains model judgement, not proof or human certification.
+
+FineMath extracts at most one labelled existing problem and final answer per webpage;
+original character spans, raw-text hash, URL and snapshot identify and trace it.
+A nonempty pre-question prefix must be retained as original-text givens or
+rejected; an assisted final-answer span cannot stop inside the original answer.
+Worked solutions, including unlabelled derivations after the question, do not enter
+model-visible state or question. Exact rational checks cover signed numbers,
+finite decimals, scientific notation, fractions, percentages, fixed-ratio
+length/area/volume/mass/time and finite compound
+units such as speed. All 15 answer pairs are checked; known equivalences and
+dimensionally mismatched distractors reject. Programmatic unknown is counted
+and rejected, **not** passed as an established difference or labelled verified.
+Ticket #26 extends this bounded numeric/unit path with short symbolic/algebraic
+results, finite solution sets and independent same-model LLM adjudication of
+in-scope unknowns; this trial is not a permanent numeric-only FineMath policy.
+Absolute temperature, exchange rates, month lengths and missing conditions
+remain excluded, without LLM override.
+
+The suite reports rejection/unknown/program-relation counts, attempts, source and
+split distributions, and source-URL groups assigned before filtering. Grouping
+preserves URL query parameters and puts snapshots of a page in one split; absent or
+blank URL/snapshot identity falls back to the original raw-text group. Missing
+development or target coverage stays `complete=false`, never repaired by moving
+groups. This is not a semantic proof of source gold or a human data quality gate.
+Neither controlled HTTP checks nor incomplete suites demonstrate real service
+behavior, source quality or readiness for scaling.
+`manifest.json` verifies file SHA/count even for explicitly incomplete trials.
 
 
 ### Optional W&B tracking

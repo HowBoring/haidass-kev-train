@@ -281,6 +281,9 @@ class BuilderTests(unittest.TestCase):
 
     def test_generator_chat_template_context_limit_rejects_before_http(self):
         self.source("en", [("one", EN)])
+        generator = PreTrainedTokenizerFast.from_pretrained(self.generator_tokenizer)
+        generator.backend_tokenizer.pre_tokenizer = None
+        generator.save_pretrained(self.generator_tokenizer)
         with patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network")):
             report = build(self.config(max_context_tokens=257, max_output_tokens=256), self.root / "suite")
         self.assertEqual(report["attempts"], 0)
