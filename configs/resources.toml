@@ -7,7 +7,7 @@ local_dir = "models/base/haidass1.5-143m"
 repo_id = "jaredpalmer/kev-suites"
 revision = "a957287d1c502a4e2e3b9d9d1325c2c6f27f181c"
 local_dir = "data/raw/kev-suites"
-include = ["v4/decision-v4/*", "v6/decision-v6/*"]
+include = ["v4/decision-v4/*", "v6/decision-v6/*", "v7/decision-v7/*", "v4/transfer-v4/*"]
 
 [data.typed_decisions]
 repo_id = "LocalLLaMA/typed-decisions"

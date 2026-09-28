@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TITLE — Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- These three tags are placeholders. Run scripts/inline-lib.js on the
+     finished page and they are replaced by the library's own contents, so
+     the file works standalone. Leave them exactly as written until then. -->
+<link rel="stylesheet" href="charts-lib/charts.css">
+<style>
+  /* --card, --ink, --muted, --hair and --font are overwritten at load from
+     Charts.theme (see the sync block below), so recolouring the charts
+     recolours the page. Only these two are page-level choices: --bg is the
+     ground behind the cards, --radius is the brand's corner signature. */
+  :root { --bg:#efece6; --radius:14px;
+          --card:#f4f4f0; --ink:#111111; --muted:#555555; --hair:#dcdbd7;
+          --surface-soft:#eae8e4;   /* overwritten from Charts.theme.tileSurface below */
+          --font:'Inter','Segoe UI',Arial,Helvetica,sans-serif; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:var(--bg); color:var(--ink);
+    font-family:var(--font); }
+  .page { max-width:1600px; margin:0 auto; padding:32px; }
+  header { display:flex; justify-content:space-between; align-items:flex-end; gap:24px;
+    margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid var(--hair); }
+  header h1 { margin:0; font-size:28px; font-weight:700; letter-spacing:-0.5px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+  .stamp { color:var(--muted); font-size:12px; text-align:right; }
+  .stamp b { color:var(--ink); font-size:18px; display:block; font-weight:700; }
+
+  /* Optional KPI row. Sizes are the charts-lib type scale scaled up one step,
+     so the tiles read as the same family as the panels rather than as a second
+     design system. Use it or delete it; don't invent a different one. */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:16px; margin-bottom:16px; }
+  .kpi { background:var(--card); border-radius:var(--radius); padding:16px 18px; }
+  .kpi span { display:block; font-size:11px; font-weight:400; letter-spacing:.04em;
+    text-transform:uppercase; color:var(--muted); }
+  .kpi b { display:block; font-size:24px; font-weight:700; margin-top:6px;
+    letter-spacing:-0.4px; color:var(--ink); }
+  .kpi i { display:block; font-style:normal; font-size:11px; font-weight:400;
+    color:var(--muted); margin-top:2px; }
+
+  /* Soft surface card. For text that belongs to no single panel — a caveat, a
+     data-quality note, an ask. A low-contrast fill separates it without a rule
+     or a coloured bar cutting across the grid. Sits in the flow as its own cell. */
+  .note { background:var(--surface-soft); border-radius:var(--radius);
+    padding:16px 18px; font-size:13.5px; line-height:1.6; color:var(--ink); }
+  .note b { display:block; text-transform:uppercase; font-size:11px;
+    letter-spacing:.06em; color:var(--muted); margin-bottom:6px; }
+
+  /* Optional filter bar. Delete it entirely if the page is static — but if you
+     keep it, every control must be wired to render(). See SKILL.md § If you add
+     a control, wire it. Styled off the same tokens; no second design system. */
+  .filter-bar { display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+    margin-bottom:16px; }
+  .filter-bar label { display:flex; align-items:center; gap:8px; font-size:11px;
+    font-weight:400; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); }
+  .filter-bar select { font-family:var(--font); font-size:13px; color:var(--ink);
+    background:var(--card); border:1px solid var(--hair); border-radius:8px;
+    padding:7px 10px; }
+
+  .bento { display:grid; grid-template-columns:repeat(12,1fr); gap:16px; grid-auto-rows:340px; }
+  .cell { background:var(--card); border-radius:var(--radius); padding:6px;
+    box-shadow:0 1px 2px rgba(0,0,0,0.04); overflow:hidden; }
+  .cell .chart { width:100%; height:100%; }
+  /* A row sized by its content, for charts whose height is their row count —
+     table, reportTable, barInsightTable. A fixed 340/696px cell makes them
+     stretch rows and leave a blank band; here they take their natural height.
+     Use it as a separate grid: <div class="bento flow"><div class="cell w8">… */
+  .bento.flow { grid-auto-rows:auto; align-items:start; margin-top:16px; }
+  .flow .chart { height:auto; }
+  .w4{grid-column:span 4}.w6{grid-column:span 6}.w8{grid-column:span 8}.w12{grid-column:span 12}
+  .h2{grid-row:span 2}
+
+  footer.notes { border-top:1px solid var(--hair); margin-top:28px; padding-top:16px;
+    font-size:12px; color:var(--muted); line-height:1.6; }
+  footer.notes b { color:var(--ink); }
+
+  /* Two-up: every cell becomes half the grid, so an odd number of cells would
+     strand the last one beside an empty half. It takes the whole row instead. */
+  @media (max-width:1100px){ .w4,.w6,.w8,.w12{grid-column:span 6} .h2{grid-row:span 1}
+    .bento > *:last-child:nth-child(odd){grid-column:span 12} }
+  @media (max-width:700px){ .w4,.w6,.w8,.w12{grid-column:span 12} .page{padding:16px} }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>TITLE</h1>
+      <p>One line of scope: what is measured, across what population.</p>
+    </div>
+    <div class="stamp">Reporting window<b>START — END</b></div>
+  </header>
+
+  <!-- Optional: headline figures. Label, value, and one line of context — no
+       arrows, no colour-coded verdicts, no editorial. Delete if not needed. -->
+  <div class="kpis">
+    <div class="kpi"><span>Metric name</span><b id="k1">—</b><i>vs 1,180 prior period</i></div>
+    <div class="kpi"><span>Metric name</span><b>56%</b><i>Q1 average</i></div>
+  </div>
+
+  <!-- Optional filter bar. DELETE THIS BLOCK if the page is static. If you keep
+       it, every option must actually filter the data, every dependent panel and
+       KPI must redraw, and any action title must be recomputed from the filtered
+       rows — see render() below. A dead dropdown discredits the whole page. -->
+  <div class="filter-bar">
+    <label>Region
+      <select id="f-region">
+        <option value="all">All regions</option>
+        <option value="North">North</option>
+        <option value="South">South</option>
+      </select>
+    </label>
+  </div>
+
+  <!-- THE GRID IS NOT A TEMPLATE — BUILD IT FROM YOUR PANEL PLAN.
+       There is deliberately no starter arrangement here, because whatever
+       arrangement shipped in this file would end up on every page this skill
+       produces regardless of the data. Derive the rows instead:
+         · one trend dominates  → w8 h2 hero + w4 / w4 beside it
+         · two things compared  → w6 + w6
+         · a ranking leads      → w12 across the top
+         · a funnel / sequence  → w12 first
+         · nothing dominates    → w4 · w4 · w4 of equal weight
+         · geography leads      → w8 geofacet + w4 h2 ranked list
+       Full derivation, and the rule that a hero must be earned, in
+       references/layout.md § Compose the grid from the findings.
+       Spans: w4 w6 w8 w12 (columns), h2 (double height). One chart div per
+       cell, ids in sync with the script below. Replace this whole block. -->
+  <div class="bento">
+    <div class="cell w6"><div class="chart" id="c1"></div></div>
+    <div class="cell w6"><div class="chart" id="c2"></div></div>
+  </div>
+
+  <footer class="notes">
+    <b>Sources.</b> … &nbsp;·&nbsp; <b>Definitions.</b> … &nbsp;·&nbsp; Note any illustrative figures here.
+  </footer>
+</div>
+
+<!-- theme.js MUST load before charts.js; both are inlined by scripts/inline-lib.js -->
+<script src="charts-lib/theme.js"></script>
+<script src="charts-lib/charts.js"></script>
+<script>
+/* Brand recolour goes HERE, before any chart is drawn — one applyPalette call
+   with the neutral and series palette, never per-chart colours and never
+   role-by-role (that is how tiles and tooltips get left on the old palette).
+   Generate the block with scripts/extract-theme.js; see references/theming.md.
+   Delete this block when using the default theme.
+
+Charts.applyPalette({ n0: '…', n0a: '…', n1: '…', n8: '…', s1: '…', s2: '…' });
+*/
+
+/* Page chrome follows the chart theme, so there is one source of colour truth. */
+(function () {
+  const t = Charts.theme, s = document.documentElement.style;
+  s.setProperty('--card',  t.bg);
+  s.setProperty('--ink',   t.titleColor);
+  s.setProperty('--muted', t.secondaryColor);
+  s.setProperty('--hair',  t.grid);
+  s.setProperty('--font',  t.font);
+  // Soft surfaces take the theme's own panel token — the same fill a geofacet
+  // tile uses — so the page and the charts step off the canvas by the same
+  // amount, and a dark palette inverts without any luminance guesswork here.
+  s.setProperty('--surface-soft', t.tileSurface);
+})();
+</script>
+<script>
+/* Two example panels only — one per grid cell above. They exist to show the
+   mechanics that are easy to get wrong, NOT to suggest an opening row:
+   replace both, and build as many panels as the findings need.
+     · a filtered dataset with one render() path (first paint included)
+     · per-point emphasis so the picture agrees with the title
+     · an action title recomputed from the filtered rows
+   Delete the filter bar above and the listener below if the page is static;
+   keep the emphasis and the data labels either way. Chart options for every
+   type are in references/chart-api.md — don't guess option names. */
+const DATA = [
+  { name: 'Cat A', region: 'North', value: 980 },
+  { name: 'Cat B', region: 'South', value: 740 },
+  { name: 'Cat C', region: 'North', value: 610 },
+  { name: 'Cat D', region: 'South', value: 420 }
+];
+
+function readState() {
+  return { region: document.getElementById('f-region').value };
+}
+
+// One live chart per container. Re-calling a factory does not tear down the
+// chart already there: its ResizeObserver lives on, so every resize repaints
+// each stale config (the unfiltered chart flashes up) before the current one,
+// and the pile grows with every filter change. So every redraw goes through
+// draw(), which destroys the previous handle first.
+const handles = {};
+function draw(factory, id, config) {
+  if (handles[id]) handles[id].destroy();
+  return (handles[id] = factory(id, config));
+}
+
+function render(state) {
+  const T = Charts.theme;
+  const rows = DATA
+    .filter(r => state.region === 'all' || r.region === state.region)
+    .sort((a, b) => b.value - a.value);
+
+  const total  = rows.reduce((s, r) => s + r.value, 0);
+  const topTwo = rows.slice(0, 2).reduce((s, r) => s + r.value, 0);
+  const share  = total ? Math.round(100 * topTwo / total) : 0;
+  const scope  = state.region === 'all' ? 'All regions' : state.region;
+
+  // Every dependent readout updates, KPI tiles included.
+  document.getElementById('k1').textContent = total.toLocaleString();
+
+  draw(Charts.bar, 'c1', {
+    // Descriptive fallback when the slice is too small to support the claim.
+    title: rows.length > 2
+      ? `Top two categories drive ${share}% of volume`
+      : 'Volume by category',
+    subtitle: `Units · ${scope}`,
+    xAxis: { categories: rows.map(r => r.name) },
+    plotOptions: { series: { dataLabels: { enabled: true } } },
+    legend: { enabled: false },
+    // Emphasis only exists while there is something to de-emphasise. In the
+    // fallback state every bar takes the plain accent — an all-grey chart reads
+    // as disabled, not as neutral.
+    series: [{ name: 'Units', data: rows.map((r, i) => ({
+      y: r.value,
+      color: (rows.length <= 2 || i < 2) ? T.colors[1] : T.muted
+    })) }]
+  });
+
+  draw(Charts.column, 'c2', {
+    title: 'Volume by category and region',
+    subtitle: `Units · ${scope}`,
+    xAxis: { categories: rows.map(r => r.name) },
+    legend: { enabled: false },
+    series: [{ name: 'Units', data: rows.map(r => r.value) }]
+  });
+}
+
+document.querySelectorAll('.filter-bar select').forEach(sel =>
+  sel.addEventListener('change', () => render(readState())));
+
+render(readState());   // first paint goes through the same path — never a second one
+</script>
+</body>
+</html>

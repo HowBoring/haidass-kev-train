@@ -1,0 +1,28 @@
+# Full-backbone arm: same v7 data and budget, with a conservative backbone LR.
+base_path = "models/base/haidass1.5-143m"
+suite_path = "data/raw/kev-suites/v7/decision-v7"
+train_sources = ["agnews", "amazon", "banking77", "boolq", "dbpedia14", "imdb", "mnli", "sst5", "trec", "yelp", "compositional"]
+seed = 42
+batch_size = 4
+gradient_accumulation = 4
+learning_rate = 0.00005
+head_learning_rate = 0.0002
+weight_decay = 0.01
+max_steps = 2190
+warmup_steps = 109
+scheduler = "cosine"
+eval_interval = 200
+checkpoint_interval = 200
+max_packed = 2048
+eval_batch_size = 4
+max_grad_norm = 1.0
+training_mode = "full"
+probe_groups = 64
+development_selection = "clean"
+
+[augmentation]
+shuffle = true
+p_none = 0.1
+p_none_distract = 0.12
+p_distract = 0.15
+p_none_pair = 0.25

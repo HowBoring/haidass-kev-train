@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TITLE — Deck</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- These tags are placeholders. Run scripts/inline-lib.js on the finished
+     page and they are replaced by the library's own contents, so the file
+     works standalone. Leave them exactly as written until then. -->
+<link rel="stylesheet" href="charts-lib/charts.css">
+<style>
+  /* Same token contract as dashboard.html / report.html: --card, --ink,
+     --muted, --hair and --font are overwritten at load from Charts.theme (sync
+     block near the bottom), so recolouring the charts recolours the deck.
+     Two surfaces, the same pair dashboard.html uses. --ground is the slide
+     itself, one soft step darker than the cards; --card is the chart surface,
+     the colour the charts paint themselves, so a figure lifts off the slide by
+     luminance rather than by a border alone. --ground is the one page-level
+     colour choice here — repick it with the palette when you recolour.
+     --surface-soft is a third, quieter surface, reserved for notes, tables and
+     quadrants — text that belongs to no single chart. */
+  :root { --ground:#efece6;
+          --card:#f4f4f0; --ink:#111111; --muted:#555555; --hair:#dcdbd7;
+          --surface-soft:#eae8e4;
+          --font:'Inter','Segoe UI',Arial,Helvetica,sans-serif;
+          /* Slides are authored at this size and scaled to the column width, so
+             every slide is exactly 16:9 and one layout fits every screen. */
+          --slide-w:1280px; --slide-h:720px;
+          /* One margin governs every slide; only a full-bleed image crosses it. */
+          --pad:64px; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; background:var(--ground); color:var(--ink);
+    font-family:var(--font); -webkit-font-smoothing:antialiased; }
+
+  /* ── The deck is a document ───────────────────────────────────────────────
+     It reads the way a PDF does in a browser tab: slides stacked in one
+     scrolling column, no ground colour behind them, no progress bar, no
+     next/back controls, nothing to click. Scrolling is the only navigation,
+     which is also what lets it print straight to A4 landscape, one slide per
+     sheet — see the @page block at the end of this stylesheet. */
+  .deck { max-width:1280px; margin:0 auto; padding:40px 24px 80px; }
+  /* Pages are separated by margin alone. Padding or a border inside the page
+     would sit inside the 16:9 box and push the slide past its own frame. */
+  .page { position:relative; width:100%; aspect-ratio:16/9; margin-top:44px; }
+  .page:first-child { margin-top:0; }
+  /* The slide keeps its authored 1280x720 box and is scaled to the column, so
+     type, charts and spacing shrink together and nothing reflows. */
+  .slide { position:absolute; top:0; left:0;
+    width:var(--slide-w); height:var(--slide-h);
+    transform-origin:top left; transform:scale(var(--k,1));
+    background:var(--ground); padding:var(--pad) var(--pad) 88px; }
+  /* A dark slide inverts the pair: the ground is the darkest thing on it and a
+     card sits one step above, so a figure still reads as lifted. */
+  .slide.dark { --ground:#111111; --card:#232321; --ink:#f4f4f0; --muted:#a3a3a0;
+    --hair:#3a3a37; --surface-soft:#1a1a18; background:#111111; color:#f4f4f0; }
+
+  /* ── Type scale ───────────────────────────────────────────────────────────
+     Six sizes, no more: h1 for covers, h2 for the slide claim, h3 for a unit
+     heading inside a layout, .lead for the supporting sentence, .body for
+     prose, .micro for chrome. Do not add a seventh for one slide. */
+  h1 { font-size:76px; line-height:1.02; letter-spacing:-2px; font-weight:700; margin:0; }
+  h2 { font-size:38px; line-height:1.15; letter-spacing:-0.8px; font-weight:700; margin:0; }
+  h3 { font-size:21px; line-height:1.25; letter-spacing:-0.3px; font-weight:700; margin:0; }
+  .lead  { font-size:22px; line-height:1.4; color:var(--muted); margin:12px 0 0; max-width:24em; }
+  .body  { font-size:16px; line-height:1.6; color:var(--muted); margin:10px 0 0; }
+  .kicker{ font-size:12px; text-transform:uppercase; letter-spacing:1.2px;
+    font-weight:700; color:var(--muted); margin:0 0 14px; }
+  .micro { font-size:11px; letter-spacing:.04em; color:var(--muted); }
+  .num   { font-variant-numeric:tabular-nums; }
+
+  /* ── Slide chrome ─────────────────────────────────────────────────────────
+     One footer rhythm across the deck, generated from data-title and the
+     slide's position so it cannot drift out of sync with the order. */
+  .foot { position:absolute; left:var(--pad); right:var(--pad); bottom:28px;
+    display:flex; gap:40px; align-items:baseline; font-size:11px;
+    letter-spacing:.03em; color:var(--muted);
+    border-top:1px solid var(--hair); padding-top:14px; }
+  .foot .name { font-weight:700; color:var(--ink); }
+  .foot .n { margin-left:auto; font-variant-numeric:tabular-nums; }
+
+  /* ── Figures ──────────────────────────────────────────────────────────────
+     Every chart sits in a card: --card, the lighter of the two surfaces and the
+     one the charts paint themselves, over the darker --ground of the slide. The
+     luminance step is what separates the figure; the hairline and the small
+     shadow only sharpen the edge. The card is the only frame a chart gets — no
+     caption rule under it, no second border. */
+  figure { margin:0; }
+  .chart { width:100%; height:100%; }
+  .fig { display:flex; flex-direction:column; min-height:0; min-width:0;
+    background:var(--card); border:1px solid var(--hair); border-radius:10px;
+    padding:10px; box-shadow:0 1px 2px rgba(0,0,0,0.04); overflow:hidden; }
+  /* min-height:0 is load-bearing, not tidiness: a flex item refuses to shrink
+     below its content height without it, so a chart whose labels wrap grew past
+     the card, and overflow:hidden clipped it — which reads as a card with no
+     bottom padding. */
+  .fig .chart { flex:1; min-height:0; }
+  /* The row-based chart types (barList, dumbbell, barInsightTable, waffle) fill
+     a container that has a height and grow to their own rows when it has none.
+     Give their .fig this class to take the height away, so the card wraps the
+     rows rather than stretching them to the bottom of the cell. */
+  .fig.auto { align-self:start; justify-content:flex-start; }
+  .fig.auto .chart { flex:0 0 auto; }
+
+  /* The filled surfaces: a note and a table row. Both are text that belongs to
+     no single chart, and the fill separates them without a rule cutting across
+     the slide. Nothing else in the deck takes a fill. */
+  .note { background:var(--surface-soft); border-radius:4px; padding:18px 20px;
+    font-size:14px; line-height:1.6; color:var(--ink); }
+  .note b { display:block; text-transform:uppercase; font-size:11px;
+    letter-spacing:.06em; color:var(--muted); margin-bottom:6px; }
+
+  .imgbox { background:var(--surface-soft); border-radius:4px; overflow:hidden; }
+  .imgbox img { width:100%; height:100%; object-fit:cover; display:block; }
+
+  /* ══ LAYOUTS ══════════════════════════════════════════════════════════════
+     Eighteen layouts, each answering a different job a slide has to do. Pick
+     one per slide and do not blend two — a slide that needs a nineteenth
+     layout is usually two slides.
+
+       STRUCTURE   l-cover · l-agenda · l-section · l-statement · l-quote
+       EVIDENCE    l-split · l-media · l-full · l-kpi · l-compare
+       ANALYSIS    l-three · l-grid · l-table · l-matrix
+       ARGUMENT    l-list · l-steps · l-timeline · l-stat
+
+     All eighteen are built from the tokens and the type scale above, which is
+     what keeps them reading as one deck rather than eighteen designs.
+     ═════════════════════════════════════════════════════════════════════════ */
+
+  /* A layout class goes on the .slide itself, which already has the authored
+     height and reserves the footer strip in its own padding. So no layout sets
+     a height of its own — a `height:100%` here would resolve against the
+     scaled .page box and silently shrink every slide. The generated .foot is
+     absolutely positioned, which keeps it out of these grids and flex rows.
+     ------------------------------------------------------------------------ */
+
+  /* ── STRUCTURE ─────────────────────────────────────────────────────────── */
+
+  /* Cover — the only slide where type may fill the frame. */
+  .l-cover { display:flex; flex-direction:column; justify-content:center; }
+  .l-cover .lead { font-size:24px; max-width:26em; margin-top:20px; }
+  .l-cover .meta { position:absolute; left:var(--pad); bottom:96px; }
+
+  /* Agenda — the title anchors the left half, contents are a ruled list on the
+     right. Part rows outweigh their child rows; that hierarchy is the layout. */
+  .l-agenda { display:grid; grid-template-columns:1fr 1.15fr; gap:56px; align-items:start; }
+  .toc .part, .toc .row { display:flex; justify-content:space-between;
+    align-items:baseline; gap:24px; padding:9px 0; }
+  .toc .part { font-size:25px; font-weight:700; letter-spacing:-0.4px;
+    border-bottom:1px solid var(--hair); padding-bottom:12px; margin-top:14px; }
+  .toc .part:first-child { margin-top:0; }
+  /* A rule under every row, not just under the part headings: the agenda is a
+     list the audience reads down, and without the rules a long title and the
+     slide number beside it stop looking like one line. */
+  .toc .row { font-size:15px; color:var(--muted);
+    border-bottom:1px solid var(--hair); }
+  .toc .row:last-child { border-bottom:0; }
+  /* The number never wraps and never shrinks; the title is what reflows when it
+     is long, which is the behaviour that keeps a wordy agenda readable. */
+  .toc .num { flex:0 0 auto; white-space:nowrap; }
+
+  /* Section divider — a breath between parts. Number, name, nothing else. */
+  .l-section { display:flex; flex-direction:column; justify-content:center; }
+  .l-section .no { font-size:180px; line-height:1; font-weight:700;
+    letter-spacing:-6px; color:var(--surface-soft); }
+  .l-section h2 { font-size:52px; margin-top:-20px; }
+
+  /* Statement — one sentence carrying a whole beat of the argument: the thesis,
+     the turn, the ask. Three or four in a deck at most, or the emphasis stops
+     meaning anything. */
+  .l-statement { display:flex; flex-direction:column; justify-content:center; }
+  .l-statement .say { font-size:52px; line-height:1.12; letter-spacing:-1.4px;
+    font-weight:700; max-width:17em; margin:0; }
+  .l-statement .say em { font-style:normal; color:var(--muted); }
+
+  /* Quote — a verbatim from research, a customer, a review. The mark sits in
+     the margin so the text stays flush with every other slide's left edge. */
+  .l-quote { display:grid; grid-template-columns:64px 1fr; gap:24px; align-content:center; }
+  .l-quote .mark { font-size:110px; line-height:.8; font-weight:700; color:var(--surface-soft); }
+  .l-quote blockquote { margin:0; font-size:34px; line-height:1.3;
+    letter-spacing:-0.7px; font-weight:700; max-width:20em; }
+  .l-quote .who { margin-top:24px; font-size:14px; color:var(--muted); }
+  .l-quote .who b { display:block; color:var(--ink); font-size:15px; }
+
+  /* ── EVIDENCE ──────────────────────────────────────────────────────────── */
+
+  /* Split — evidence and its reading as equal partners. .flip swaps sides. */
+  .l-split { display:grid; grid-template-columns:1fr 1fr; gap:48px; align-items:center; }
+  .l-split .fig { height:78%; }
+  .l-split.flip .fig { order:2; }
+
+  /* Media-led — the chart argues, a narrow column annotates. */
+  .l-media { display:grid; grid-template-columns:1.85fr 1fr; gap:40px; }
+  .l-media.flip .fig { order:2; }
+  .l-media .words { align-self:start; padding-top:4px; }
+
+  /* Full-bleed figure — one chart across the whole slide, claim above, reading
+     below. The right layout when the shape of the data is the argument and
+     words beside it would only crowd it. */
+  .l-full { display:grid; grid-template-rows:auto 1fr auto; gap:14px; }
+  .l-full .read { font-size:14px; color:var(--muted); line-height:1.5;
+    border-top:1px dotted var(--hair); padding-top:10px; }
+  .l-full .read b { color:var(--ink); }
+
+  /* KPI strip — the numbers that frame the slide, then the chart that explains
+     them. A row of readouts between two rules, never a row of tiles. */
+  .l-kpi { display:grid; grid-template-rows:auto auto 1fr; gap:18px; }
+  .kpirow { display:grid; grid-template-columns:repeat(auto-fit,minmax(0,1fr));
+    gap:32px; border-top:1px solid var(--hair); border-bottom:1px solid var(--hair);
+    padding:16px 0; }
+  .kpirow .k span { display:block; font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; color:var(--muted); }
+  .kpirow .k b { display:block; font-size:34px; font-weight:700; letter-spacing:-1px;
+    margin-top:4px; font-variant-numeric:tabular-nums; }
+  .kpirow .k i { display:block; font-style:normal; font-size:12px; color:var(--muted); }
+
+  /* Compare — two options, cuts or periods answered on identical terms. The
+     centre rule is what makes it a comparison rather than two half-slides. */
+  .l-compare { display:grid; grid-template-columns:1fr 1px 1fr; gap:40px; }
+  .l-compare .rule { background:var(--hair); }
+  .l-compare .side { display:flex; flex-direction:column; min-height:0; }
+  .l-compare .side .fig { flex:1; margin-top:14px; }
+  .l-compare .side .tag { font-size:11px; text-transform:uppercase;
+    letter-spacing:.08em; color:var(--muted); margin-bottom:4px; }
+
+  /* ── ANALYSIS ──────────────────────────────────────────────────────────── */
+
+  /* Three peers — options, goals, workstreams. Equal columns, equal weight. */
+  .l-three { display:grid; grid-template-columns:repeat(3,1fr); gap:32px; }
+  .l-three .col { display:flex; flex-direction:column; min-height:0; }
+  .l-three .col .fig, .l-three .col .note { margin-top:16px; }
+  .l-three .col .fig { flex:1; }
+
+  /* Grid — the overview slide, in the same 12-column vocabulary as
+     dashboard.html so a deck slide and a dashboard panel are one system. */
+  .l-grid { display:grid; grid-template-columns:repeat(12,1fr); grid-auto-rows:1fr; gap:28px; }
+  .w3{grid-column:span 3}.w4{grid-column:span 4}.w5{grid-column:span 5}
+  .w6{grid-column:span 6}.w7{grid-column:span 7}.w8{grid-column:span 8}
+  .w9{grid-column:span 9}.w12{grid-column:span 12}
+  .h2{grid-row:span 2}
+
+  /* Table — for when the exact values are the point. Numbers right and tabular,
+     one emphasised group, and no more than about six rows: past that it is a
+     handout, not a slide. */
+  .l-table { display:grid; grid-template-rows:auto 1fr; gap:20px; }
+  table.data { width:100%; border-collapse:collapse; font-size:15px; }
+  table.data th { text-align:left; font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; color:var(--muted); font-weight:400;
+    padding:0 12px 10px 0; border-bottom:1px solid var(--hair); }
+  table.data td { padding:13px 12px; border-bottom:1px solid var(--hair); }
+  table.data td:first-child, table.data th:first-child { padding-left:0; }
+  table.data td.n, table.data th.n { text-align:right; font-variant-numeric:tabular-nums; }
+  table.data tr.mark td { background:var(--surface-soft); font-weight:700; }
+
+  /* Matrix — a 2x2 for positioning, prioritisation or risk. The axes are labels
+     on the frame rather than drawn lines, so the quadrants stay the subject. */
+  .l-matrix { display:grid; grid-template-columns:120px 1fr; grid-template-rows:1fr auto;
+    gap:16px 24px; }
+  .l-matrix .yaxis { display:flex; align-items:center; justify-content:flex-end; }
+  .l-matrix .yaxis span { writing-mode:vertical-rl; transform:rotate(180deg);
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+  .l-matrix .quads { display:grid; grid-template-columns:1fr 1fr;
+    grid-template-rows:1fr 1fr; gap:1px; background:var(--hair); }
+  .l-matrix .q { background:var(--card); padding:22px; }
+  .l-matrix .q.on { background:var(--surface-soft); }
+  .l-matrix .xaxis { grid-column:2; text-align:center; font-size:11px;
+    text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+
+  /* ── ARGUMENT ──────────────────────────────────────────────────────────── */
+
+  /* Explained list — claim beside 2-4 points, each a heading plus two lines. A
+     point that needs more than that has earned its own slide. */
+  .l-list { display:grid; grid-template-columns:1fr 1.25fr; gap:56px; align-items:center; }
+  .l-list .item { display:grid; grid-template-columns:34px 1fr; gap:16px;
+    padding:20px 0; border-top:1px solid var(--hair); }
+  .l-list .item:first-child { border-top:0; padding-top:0; }
+  .l-list .item .no { font-size:15px; font-weight:700; color:var(--muted);
+    font-variant-numeric:tabular-nums; padding-top:3px; }
+  .l-list .item .body { max-width:34em; }
+
+  /* Steps — a sequence where the order is the message: a process, a rollout,
+     the stages of a funnel. Numbered, divided, left to right. */
+  .l-steps { display:grid; grid-template-rows:auto 1fr; gap:28px; }
+  .steps { display:grid; grid-auto-flow:column; grid-auto-columns:1fr;
+    align-content:center; }
+  .steps .s { padding:0 26px; border-left:1px solid var(--hair); }
+  .steps .s:first-child { padding-left:0; border-left:0; }
+  .steps .s .no { font-size:13px; font-weight:700; color:var(--muted); }
+  .steps .s h3 { margin-top:10px; }
+  .steps .s.on h3 { text-decoration:underline; text-decoration-thickness:3px;
+    text-underline-offset:6px; }
+
+  /* Timeline — dated milestones on one spine. Use it for a roadmap or a
+     history; use l-steps when the sequence carries no dates. */
+  .l-timeline { display:grid; grid-template-rows:auto 1fr; gap:28px; }
+  .tl { display:grid; grid-auto-flow:column; grid-auto-columns:1fr;
+    align-content:center; position:relative; padding-top:44px; }
+  .tl::before { content:''; position:absolute; top:16px; left:0; right:0;
+    height:1px; background:var(--hair); }
+  .tl .t { position:relative; padding-right:24px; }
+  .tl .t::before { content:''; position:absolute; top:-33px; left:0;
+    width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .tl .t.on::before { background:var(--ink); width:13px; height:13px; top:-35px; }
+  .tl .t .when { font-size:12px; font-weight:700; letter-spacing:.04em;
+    text-transform:uppercase; color:var(--muted); }
+  .tl .t h3 { font-size:19px; margin-top:6px; }
+
+  /* Stat — the number is the slide. Two figures with the .arrow between them
+     read as a before and after; one figure reads as the headline. */
+  .l-stat { display:flex; align-items:center; justify-content:center; gap:72px; }
+  .l-stat .f { text-align:center; }
+  .l-stat .f b { display:block; font-size:110px; line-height:1; font-weight:700;
+    letter-spacing:-4px; font-variant-numeric:tabular-nums; }
+  /* margin-inline:auto matters because of the max-width: without it the caption
+     is an 11em block pinned to the left of a much wider number, which reads as a
+     misalignment rather than as a caption. */
+  .l-stat .f span { display:block; font-size:19px; color:var(--muted);
+    margin-top:14px; max-width:11em; margin-inline:auto; }
+  .l-stat .arrow { text-align:center; color:var(--muted); }
+  .l-stat .arrow hr { border:0; border-top:1px solid currentColor; width:130px; margin:0 0 8px; }
+
+  /* Printing gives one slide per page, still at exactly 16:9. */
+  /* ── Print: one slide per A4 landscape page ───────────────────────────────
+     Print (Ctrl/Cmd+P) → Save as PDF and the deck comes out as A4 landscape,
+     one slide per sheet. Leave the printer's own margins at Default or None;
+     @page already sets them to zero.
+
+     A4 landscape is 297x210mm — 1.414:1, against the slide's 16:9 — so the
+     slide fits the page WIDTH and centres in the leftover height, the same
+     choice a projector makes.
+
+     The screen path scales the slide with a transform, which leaves its layout
+     box at the authored 1280x720. On paper that box is wider than the sheet,
+     and the print engine fragments it: backgrounds get clipped part-way down
+     and content spills past the page edge. So printing uses `zoom` instead,
+     which scales the layout box itself — the slide becomes a real 1122x631px
+     block that fits inside the sheet and needs no offsets. `zoom` is supported
+     by Chrome, Edge and Safari, which is where Save as PDF actually happens.
+
+     0.877 = 297mm at 96dpi (1122.5px) ÷ the 1280px authored width. Change
+     --slide-w and it needs recomputing. */
+  @page { size: A4 landscape; margin: 0; }
+  @media print {
+    html, body { background:#fff; }
+    .deck { max-width:none; margin:0; padding:0; }
+    .page { width:297mm; height:210mm; aspect-ratio:auto; margin:0; padding:0;
+      display:flex; align-items:center; justify-content:center;
+      overflow:hidden; break-after:page; page-break-after:always; }
+    .page:last-child { break-after:auto; page-break-after:auto; }
+    /* In flow + zoom: the box really is 1122x631 here, so the flex centring
+       above does the positioning and the transform is dropped entirely.
+       position stays `relative` rather than `static` — the slide has to remain
+       the containing block for the absolutely positioned .foot and .l-cover
+       .meta, which otherwise fall through to .page and print below the slide. */
+    .slide { position:relative; transform:none; zoom:0.877;
+      /* Dark slides and note fills must survive the browser's default of
+         dropping backgrounds when printing. */
+      -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  }
+</style>
+</head>
+<body>
+<div class="deck">
+  <!-- WHAT FOLLOWS IS A CATALOGUE, NOT A RUNNING ORDER — one worked example of
+       each layout, so the markup for all eighteen is visible in one place.
+       Delete the ones the deck does not need and repeat the ones it does.
+
+       THE SPINE IS FIXED, THE EVIDENCE IS NOT. Every deck this skill builds
+       opens with l-cover then l-agenda, carries an l-section divider before
+       each section when it has two or more, and ends on an l-statement holding
+       the recap and the ask. Those four are not judgment calls — they are what
+       makes two decks built from the same findings come out the same deck, and
+       scripts/check-page.js fails the build when one is missing. What the
+       findings decide is the middle: which claims, in which sections, on which
+       evidence layouts. Full procedure in references/layout.md § Compose the
+       sequence. Rules that matter:
+         · One claim per slide, written as the h2 — never a topic label.
+         · The agenda's .toc .part entries and the l-section dividers are the
+           same list in the same order; an index that promises three parts and
+           delivers two loses the reader by the second.
+         · A chart appears once, arguing one point on one slide.
+         · Charts sit in .fig cards; don't add a frame of your own.
+         · Slide count follows the argument, not a target number. -->
+
+  <!-- 1 · Cover -->
+  <div class="page"><section class="slide l-cover" data-title="Cover">
+    <p class="kicker">Deck name · Context</p>
+    <h1>The claim the<br>deck exists to make</h1>
+    <p class="lead">One sentence of scope: what is measured, over what period, for whom.</p>
+    <div class="meta micro">Author · Team · DATE</div>
+  </section></div>
+
+  <!-- 2 · Agenda. A real contents list, not a summary: one .row per slide in
+       the section, carrying that slide's claim and its number, so the count the
+       audience sees matches the deck they get. The .part headings and the
+       l-section dividers are the same list in the same order.
+       A ONE-SECTION DECK USES .row ENTRIES ONLY — no .part headings at all. A
+       heading reading "One part" is the layout admitting it had nothing to
+       divide. Keep each row to a phrase that fits on one line beside its
+       number; the full sentence belongs on the slide. -->
+  <div class="page"><section class="slide l-agenda" data-title="Agenda">
+    <div><h1>Agenda</h1></div>
+    <div class="toc">
+      <div class="part">Where we are <span class="num">Part 1</span></div>
+      <div class="row">Adoption tripled <span class="num">04</span></div>
+      <div class="row">Where the time goes <span class="num">05</span></div>
+      <div class="row">Growth by segment <span class="num">06</span></div>
+      <div class="part">What we propose <span class="num">Part 2</span></div>
+      <div class="row">The quarter in four numbers <span class="num">08</span></div>
+      <div class="row">The two options <span class="num">09</span></div>
+      <div class="row">Sequencing <span class="num">10</span></div>
+      <div class="part">The ask <span class="num">Part 3</span></div>
+      <div class="row">What we need to decide <span class="num">12</span></div>
+    </div>
+  </section></div>
+
+  <!-- 3 · Section divider -->
+  <div class="page"><section class="slide l-section dark" data-title="Part 1">
+    <div class="no">01</div>
+    <h2>Where we are</h2>
+  </section></div>
+
+  <!-- 4 · Statement: the thesis, before any evidence -->
+  <div class="page"><section class="slide l-statement" data-title="Thesis">
+    <p class="say">Every account we lose, we lose at the door — <em>not inside
+      the product.</em></p>
+  </section></div>
+
+  <!-- 5 · Split: evidence beside its reading. Add .flip to swap sides. -->
+  <div class="page"><section class="slide l-split" data-title="Trend">
+    <figure class="fig">
+      <div class="chart" id="c-trend"></div>
+    </figure>
+    <div class="words">
+      <h2>Adoption tripled in six weeks</h2>
+      <p class="body">Two or three sentences saying what the chart shows and what
+        follows from it — not a description of the axes.</p>
+    </div>
+  </section></div>
+
+  <!-- 6 · Media-led -->
+  <div class="page"><section class="slide l-media" data-title="Where time goes">
+    <figure class="fig auto">
+      <div class="chart" id="c-rank"></div>
+    </figure>
+    <div class="words">
+      <h3>Sign-in takes half again as long as the next slowest step</h3>
+      <p class="body">A narrow annotation column. Keep it short — the picture is
+        doing the arguing here.</p>
+    </div>
+  </section></div>
+
+  <!-- 7 · Full-bleed figure -->
+  <div class="page"><section class="slide l-full" data-title="By segment">
+    <h2>Growth is concentrated in two segments</h2>
+    <figure class="fig"><div class="chart" id="c-full"></div></figure>
+    <p class="read"><b>Read.</b> The other segments moved less than the
+      measurement error, so the average hides the whole story.</p>
+  </section></div>
+
+  <!-- 8 · KPI strip over a chart -->
+  <div class="page"><section class="slide l-kpi" data-title="Quarter">
+    <h2>The quarter in four numbers</h2>
+    <div class="kpirow">
+      <div class="k"><span>Accounts</span><b>12,480</b><i>+18% vs prior quarter</i></div>
+      <div class="k"><span>Activation</span><b>61%</b><i>+27 points</i></div>
+      <div class="k"><span>Time to value</span><b>4.2d</b><i>−1.9 days</i></div>
+      <div class="k"><span>Support load</span><b>0.8</b><i>tickets per account</i></div>
+    </div>
+    <figure class="fig"><div class="chart" id="c-kpi"></div></figure>
+  </section></div>
+
+  <!-- 9 · Compare -->
+  <div class="page"><section class="slide l-compare" data-title="Options">
+    <div class="side">
+      <div class="tag">Option A</div>
+      <h3>Rebuild the sign-in flow</h3>
+      <figure class="fig"><div class="chart" id="c-a"></div></figure>
+    </div>
+    <div class="rule"></div>
+    <div class="side">
+      <div class="tag">Option B</div>
+      <h3>Add social sign-in only</h3>
+      <figure class="fig"><div class="chart" id="c-b"></div></figure>
+    </div>
+  </section></div>
+
+  <!-- 10 · Three peers -->
+  <div class="page"><section class="slide l-three" data-title="Goals">
+    <div class="col">
+      <h3>Cut the drop-off</h3><p class="body">One line saying what it means.</p>
+      <figure class="fig"><div class="chart" id="c-g1"></div></figure>
+    </div>
+    <div class="col">
+      <h3>Shorten time to value</h3><p class="body">One line saying what it means.</p>
+      <figure class="fig"><div class="chart" id="c-g2"></div></figure>
+    </div>
+    <div class="col">
+      <h3>Hold support flat</h3><p class="body">One line saying what it means.</p>
+      <div class="note"><b>Constraint</b>A column may carry words instead of a
+        chart when the point has no measure yet.</div>
+    </div>
+  </section></div>
+
+  <!-- 11 · Grid overview -->
+  <div class="page"><section class="slide l-grid" data-title="Overview">
+    <figure class="fig w8 h2"><div class="chart" id="c-o1"></div></figure>
+    <figure class="fig w4"><div class="chart" id="c-o2"></div></figure>
+    <div class="note w4"><b>Caveat</b>Text that belongs to no single figure — a
+      method note, a gap in the data, the thing to check next.</div>
+    <figure class="fig w12"><div class="chart" id="c-o3"></div></figure>
+  </section></div>
+
+  <!-- 12 · Table -->
+  <div class="page"><section class="slide l-table" data-title="Detail">
+    <h2>Two segments carry the change</h2>
+    <table class="data">
+      <thead><tr><th>Segment</th><th class="n">Accounts</th>
+        <th class="n">Activation</th><th class="n">Change</th></tr></thead>
+      <tbody>
+        <tr class="mark"><td>Self-serve</td><td class="n">6,210</td><td class="n">68%</td><td class="n">+31 pts</td></tr>
+        <tr class="mark"><td>Small team</td><td class="n">3,940</td><td class="n">62%</td><td class="n">+24 pts</td></tr>
+        <tr><td>Mid-market</td><td class="n">1,680</td><td class="n">44%</td><td class="n">+3 pts</td></tr>
+        <tr><td>Enterprise</td><td class="n">650</td><td class="n">39%</td><td class="n">−1 pt</td></tr>
+      </tbody>
+    </table>
+  </section></div>
+
+  <!-- 13 · Matrix -->
+  <div class="page"><section class="slide l-matrix" data-title="Priorities">
+    <div class="yaxis"><span>Impact →</span></div>
+    <div class="quads">
+      <div class="q on"><h3>Do now</h3><p class="body">Sign-in rebuild</p></div>
+      <div class="q"><h3>Plan</h3><p class="body">Identity migration</p></div>
+      <div class="q"><h3>Fill in</h3><p class="body">Copy and error states</p></div>
+      <div class="q"><h3>Drop</h3><p class="body">Legacy recovery flow</p></div>
+    </div>
+    <div></div>
+    <div class="xaxis">Effort →</div>
+  </section></div>
+
+  <!-- 14 · Explained list -->
+  <div class="page"><section class="slide l-list" data-title="What we learned">
+    <div><h2>Three things<br>the research settled</h2></div>
+    <div>
+      <div class="item"><div class="no">01</div>
+        <div><h3>People do not forget passwords</h3>
+          <p class="body">They forget which method they signed up with.</p></div></div>
+      <div class="item"><div class="no">02</div>
+        <div><h3>Recovery is invisible</h3>
+          <p class="body">Nobody found the reset entry point unaided.</p></div></div>
+      <div class="item"><div class="no">03</div>
+        <div><h3>One failure ends the session</h3>
+          <p class="body">Almost nobody makes a second attempt the same day.</p></div></div>
+    </div>
+  </section></div>
+
+  <!-- 15 · Steps -->
+  <div class="page"><section class="slide l-steps" data-title="How we get there">
+    <h2>Four steps, one quarter</h2>
+    <div class="steps">
+      <div class="s"><div class="no">01</div><h3>Instrument</h3>
+        <p class="body">Measure every step of the flow.</p></div>
+      <div class="s on"><div class="no">02</div><h3>Rebuild sign-in</h3>
+        <p class="body">The change that carries the result.</p></div>
+      <div class="s"><div class="no">03</div><h3>Migrate accounts</h3>
+        <p class="body">Behind a flag, segment by segment.</p></div>
+      <div class="s"><div class="no">04</div><h3>Retire the old flow</h3>
+        <p class="body">Once recovery holds for a full week.</p></div>
+    </div>
+  </section></div>
+
+  <!-- 16 · Timeline -->
+  <div class="page"><section class="slide l-timeline" data-title="Sequencing">
+    <h2>Sequencing across the quarter</h2>
+    <div class="tl">
+      <div class="t"><div class="when">Weeks 1–2</div><h3>Instrumentation</h3>
+        <p class="body">Baseline every step.</p></div>
+      <div class="t on"><div class="when">Weeks 3–7</div><h3>Sign-in rebuild</h3>
+        <p class="body">Ships behind a flag.</p></div>
+      <div class="t"><div class="when">Weeks 8–10</div><h3>Migration</h3>
+        <p class="body">Self-serve first.</p></div>
+      <div class="t"><div class="when">Weeks 11–13</div><h3>Retirement</h3>
+        <p class="body">Old flow off.</p></div>
+    </div>
+  </section></div>
+
+  <!-- 17 · Stat pair (drop the second .f and the .arrow for a single figure) -->
+  <div class="page"><section class="slide l-stat dark" data-title="Impact">
+    <div class="f"><b>34%</b><span>completed sign-up before the change</span></div>
+    <div class="arrow micro"><hr>Rebuilt sign-in</div>
+    <div class="f"><b>61%</b><span>completed sign-up after</span></div>
+  </section></div>
+
+  <!-- 18 · Quote -->
+  <div class="page"><section class="slide l-quote" data-title="Verbatim">
+    <div class="mark">&ldquo;</div>
+    <div>
+      <blockquote>I knew the password. I just could not work out which of the
+        three buttons I had used last time.</blockquote>
+      <p class="who"><b>Participant 7</b>Usability study, round two</p>
+    </div>
+  </section></div>
+
+  <!-- 19 · Closing statement -->
+  <div class="page"><section class="slide l-statement dark" data-title="The ask">
+    <p class="say">We are asking for two engineers for one quarter — <em>and the
+      decision this week.</em></p>
+  </section></div>
+
+</div>
+
+<!-- theme.js MUST load before charts.js; both are inlined by scripts/inline-lib.js -->
+<script src="charts-lib/theme.js"></script>
+<script src="charts-lib/charts.js"></script>
+<script>
+/* Brand recolour goes HERE, before any chart is drawn — one applyPalette call
+   with the neutral and series palette, never per-chart colours. Generate the
+   block with scripts/extract-theme.js; see references/theming.md. Delete this
+   block when using the default theme.
+
+Charts.applyPalette({ n0: '…', n0a: '…', n1: '…', n8: '…', s1: '…', s2: '…' });
+*/
+
+/* Deck chrome follows the chart theme, so there is one source of colour truth.
+   --ground is deliberately NOT synced: it is the slide surface the cards sit on,
+   and it has to stay a step away from t.bg by eye. Repick it in :root whenever
+   the palette changes, the way dashboard.html's --bg is repicked. */
+(function () {
+  const t = Charts.theme, s = document.documentElement.style;
+  s.setProperty('--card',  t.bg);
+  s.setProperty('--ink',   t.titleColor);
+  s.setProperty('--muted', t.secondaryColor);
+  s.setProperty('--hair',  t.grid);
+  s.setProperty('--font',  t.font);
+  s.setProperty('--surface-soft', t.tileSurface);
+})();
+</script>
+<script>
+/* ── Deck runtime ────────────────────────────────────────────────────────────
+   Two jobs, and deliberately nothing else — no navigation, no controls, no
+   state. Slides are authored at 1280x720 and scaled to the column width, so
+   each page holds an exact 16:9 frame at any window size; and the footer
+   chrome is generated so it cannot drift out of step with the slide order. */
+const slides = [...document.querySelectorAll('.slide')];
+const DECK   = { name: 'Deck name', context: 'Context — DATE' };
+
+slides.forEach((s, i) => {
+  const f = document.createElement('div');
+  f.className = 'foot';
+  // Built at every load, so an editable deck must not save it into the file.
+  f.setAttribute('data-page-generated', '');
+  f.innerHTML = '<span class="name"></span><span class="ctx"></span>' +
+                '<span class="ttl"></span><span class="n"></span>';
+  f.querySelector('.name').textContent = DECK.name;
+  f.querySelector('.ctx').textContent  = DECK.context;
+  f.querySelector('.ttl').textContent  = s.dataset.title || '';
+  f.querySelector('.n').textContent    = i + 1;
+  s.appendChild(f);
+});
+
+function fit() {
+  const w = parseInt(getComputedStyle(document.documentElement)
+                       .getPropertyValue('--slide-w'));
+  slides.forEach(s => s.style.setProperty('--k', s.parentElement.clientWidth / w));
+}
+addEventListener('resize', fit);
+addEventListener('beforeprint', fit);
+fit();
+</script>
+<script>
+/* Example charts — one per chart div above. Replace them all; they are here to
+   show the mechanics, not to suggest a set. Deck charts differ from dashboard
+   charts in ways that all matter at projector distance:
+     · fewer series — two or three, never a legend of eight
+     · data labels on, so a value can be read from the back of the room
+     · the title carries the claim, complementing the slide's h2, not repeating it
+     · no frame of your own — .fig is the card the chart sits in
+     · colours come from the theme as they come — the ramp assigns them in
+       series order and you write no `color` at all. Greying the supporting
+       points is emphasis mode, and a slide earns it only when the chart's own
+       title names which points it means (one example below, and only one).
+   Every chart is drawn once at load: every slide is laid out on the page with a
+   real size, so nothing needs deferring or redrawing. The slides are scaled by
+   a CSS transform, which does not change the pixel size a chart measures, so a
+   window resize needs no redraw either. Chart options for every type are in
+   references/chart-api.md — don't guess option names. */
+const T = Charts.theme;
+
+Charts.line('c-trend', {
+  title: 'Adoption tripled after the change',
+  subtitle: 'Weekly active accounts · thousands',
+  xAxis: { categories: ['W1','W2','W3','W4','W5','W6'] },
+  series: [{ name: 'Accounts', data: [12, 14, 19, 31, 44, 52] }],
+  callouts: [{ x: 3, text: 'Launch' }]
+});
+
+/* barList suits a deck: no axis furniture, long names cost nothing, and the
+   value always sits outside the bar end where it stays readable. This is what
+   a deck chart normally looks like in code — a title, the data, and no colour
+   at all. Sorted descending, the ranking already says which row leads, so
+   greying the other three would spend emphasis on something the sort has
+   already done. */
+Charts.barList('c-rank', {
+  title: 'Seconds spent per step',
+  plotOptions: { barList: { sort: 'desc', valueSuffix: 's' } },
+  series: [{ name: 'Seconds', data: [
+    { name: 'Sign in', y: 48 },
+    { name: 'Verify',  y: 31 },
+    { name: 'Recover', y: 22 },
+    { name: 'Browse',  y: 9 } ] }]
+});
+
+/* The one chart in this deck that overrides a colour, and what has to be true
+   before you copy it: the title names *which* points it means, so the picture
+   has to agree with the sentence.
+
+   Note which colours. The subject takes T.colors[1] — a HUE from the ramp — and
+   everything else takes T.muted. It is tempting to leave the subject on the
+   default and just grey the rest, but the default is the ramp's first step,
+   which is black: black bars beside grey bars are two neutrals differing only
+   in lightness, and across a room that reads as "some bars are darker", not as
+   "these are the ones I mean". A hue against a neutral survives the projector.
+   Never a custom grey for the de-emphasis either — charts-lib takes a data
+   label's colour from its point colour, so an off-theme fill can make the label
+   vanish. If your title does not name specific points, write no colour at all. */
+Charts.column('c-full', {
+  title: 'Self-serve and small team account for the whole gain',
+  subtitle: 'Change in activation · percentage points',
+  xAxis: { categories: ['Self-serve','Small team','Mid-market','Enterprise'] },
+  legend: { enabled: false },
+  plotOptions: { series: { dataLabels: { enabled: true } } },
+  series: [{ name: 'Change', data: [
+    { y: 31, color: T.colors[1] }, { y: 24, color: T.colors[1] },
+    { y: 3, color: T.muted }, { y: -1, color: T.muted } ] }]
+});
+
+Charts.line('c-kpi', {
+  title: 'Activation by week',
+  subtitle: 'Percent of new accounts',
+  xAxis: { categories: ['W1','W3','W5','W7','W9','W11','W13'] },
+  series: [
+    { name: 'This quarter',  data: [34, 38, 45, 52, 57, 60, 61] },
+    { name: 'Prior quarter', data: [33, 34, 34, 35, 34, 36, 34] }
+  ]
+});
+
+/* Two charts that are read as a comparison MUST share a y scale — left to
+   themselves they each fit their own data and the shorter option looks taller
+   than it is. Set the same max on both, every time. */
+Charts.column('c-a', { title: 'Projected activation', subtitle: 'Percent',
+  legend: { enabled: false }, xAxis: { categories: ['Q1','Q2','Q3'] },
+  yAxis: { max: 70 },
+  plotOptions: { series: { dataLabels: { enabled: true } } },
+  series: [{ name: 'Percent', data: [42, 55, 61] }] });
+
+Charts.column('c-b', { title: 'Projected activation', subtitle: 'Percent',
+  legend: { enabled: false }, xAxis: { categories: ['Q1','Q2','Q3'] },
+  yAxis: { max: 70 },
+  plotOptions: { series: { dataLabels: { enabled: true } } },
+  series: [{ name: 'Percent', data: [39, 44, 46] }] });
+
+Charts.column('c-g1', { title: 'Drop-off', subtitle: 'Percent',
+  legend: { enabled: false }, xAxis: { categories: ['Now','Target'] },
+  plotOptions: { series: { dataLabels: { enabled: true } } },
+  series: [{ name: 'Percent', data: [39, 15] }] });
+
+Charts.column('c-g2', { title: 'Days to value', subtitle: 'Days',
+  legend: { enabled: false }, xAxis: { categories: ['Now','Target'] },
+  plotOptions: { series: { dataLabels: { enabled: true } } },
+  series: [{ name: 'Days', data: [6.1, 3.0] }] });
+
+Charts.line('c-o1', { title: 'Accounts by month',
+  xAxis: { categories: ['Jan','Feb','Mar','Apr','May','Jun'] },
+  series: [
+    { name: 'Self-serve', data: [4, 9, 14, 21, 28, 34] },
+    { name: 'Enterprise', data: [7, 8, 10, 11, 11, 12] }
+  ] });
+
+Charts.donut('c-o2', { title: 'Share of new accounts',
+  plotOptions: { pie: { valueSuffix: '%' } },
+  series: [{ name: 'Share', data: [
+    { name: 'Self-serve', y: 55 }, { name: 'Team', y: 30 }, { name: 'Other', y: 15 } ] }] });
+
+Charts.column('c-o3', { title: 'Support tickets per 100 accounts',
+  legend: { enabled: false },
+  xAxis: { categories: ['Jan','Feb','Mar','Apr','May','Jun'] },
+  series: [{ name: 'Tickets', data: [31, 28, 24, 19, 14, 12] }] });
+</script>
+</body>
+</html>

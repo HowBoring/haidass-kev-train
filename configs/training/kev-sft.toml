@@ -1,0 +1,28 @@
+# Three passes over 13,000 public + 448 compositional records, with a fixed update budget.
+base_path = "models/base/haidass1.5-143m"
+suite_path = "data/raw/kev-suites/v6/decision-v6"
+train_sources = ["agnews", "amazon", "arc", "banking77", "boolq", "csqa", "dbpedia14", "imdb", "mnli", "openbookqa", "sst5", "trec", "yelp", "compositional"]
+seed = 42
+batch_size = 4
+gradient_accumulation = 4
+learning_rate = 0.0002
+head_learning_rate = 0.0002
+weight_decay = 0.01
+max_steps = 2522
+warmup_steps = 126
+scheduler = "cosine"
+eval_interval = 200
+checkpoint_interval = 200
+max_packed = 2048
+eval_batch_size = 4
+max_grad_norm = 1.0
+training_mode = "lora"
+probe_groups = 64
+development_selection = "clean"
+
+[augmentation]
+shuffle = false
+p_none = 0.0
+p_none_distract = 0.0
+p_distract = 0.0
+p_none_pair = 0.0

@@ -1,2 +1,4 @@
 def main() -> None:
-    print("Hello from haidass-kev-train!")
+    from haidass_kev_train.training.sft import main as train
+
+    train()
