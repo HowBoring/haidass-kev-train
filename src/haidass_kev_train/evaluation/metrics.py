@@ -30,6 +30,8 @@ _META_FIELDS = (
     "src",
     "group_id",
     "variant",
+    "canonical_id",
+    "k",
     "option_keys",
 )
 
@@ -126,7 +128,7 @@ def predict(model, encoded_records, batch_size: int = 4, device: str = "cuda", t
                     )
                 rows.append(
                     {
-                        **{key: meta.get(key) for key in _META_FIELDS},
+                        **{key: meta[key] for key in _META_FIELDS if key in meta},
                         "probs": probs[i, j][mask].tolist(),
                         "log_probs": log_probs[i, j][mask].tolist(),
                         "target": (gold / mass).tolist(),

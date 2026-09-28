@@ -254,6 +254,7 @@ def encode_record(record: dict, tokenizer, max_packed: int = 2048) -> EncodedRec
                 "src": question.src,
                 "group_id": meta["group_id"],
                 "variant": meta["variant"],
+                **{key: meta[key] for key in ("canonical_id", "k") if key in meta},
                 "option_keys": list(question.keys),
             }
         )

@@ -77,7 +77,7 @@ class TrainingTracker:
         print(text, flush=True)
         with self.log_path.open("a") as handle:
             handle.write(text + "\n")
-        if self.run is None or event not in {"train", "train_probe", "development", "typed_development", "stage1_retention"}:
+        if self.run is None or event not in {"train", "train_probe", "development", "typed_development", "stage1_retention", "initialization", "initialization_comparison"}:
             return
         metrics = {key: value for field, item in values.items() if field != "step"
                    for key, value in _scalars(item, f"{event}/{field}")}
@@ -88,7 +88,8 @@ class TrainingTracker:
 
     def gradients(self, step, optimizer_groups):
         """Log pre-clip distributions without collecting all model gradients in memory."""
-        if self.run is None:
+        wandb = self.wandb
+        if self.run is None or wandb is None:
             return
         try:
             histograms = {}
@@ -111,7 +112,7 @@ class TrainingTracker:
                         counts += torch.histc(gradient.float(), bins=64, min=minimum, max=maximum).to(torch.int64)
                 finally:
                     torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
-                histograms[f"gradients/{group['name']}"] = self.wandb.Histogram(
+                histograms[f"gradients/{group['name']}"] = wandb.Histogram(
                     np_histogram=(counts.cpu().numpy(), np.linspace(minimum, maximum, 65)))
             if histograms:
                 self.run.log({"global_step": step, **histograms})

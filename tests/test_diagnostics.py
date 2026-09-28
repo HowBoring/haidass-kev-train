@@ -55,6 +55,46 @@ class _TinyDecisionModel(torch.nn.Module):
         return logits.masked_fill(~batch.option_mask, float("-inf"))
 
 
+class _CanonicalModel(torch.nn.Module):
+    """Known semantic probabilities, with an optional positional K=2 failure."""
+
+    def __init__(self, positional_pair=False):
+        super().__init__()
+        self.positional_pair = positional_pair
+
+    def forward(self, batch):
+        logits = torch.zeros(batch.option_mask.shape, device=batch.option_mask.device)
+        for i, questions in enumerate(batch.metadata):
+            for j, meta in enumerate(questions):
+                keys = meta["option_keys"]
+                if self.positional_pair:
+                    winner = keys[0] if len(keys) == 2 else min(keys)
+                    logits[i, j, keys.index(winner)] = math.log(9)
+                else:
+                    logits[i, j, keys.index("gold")] = math.log(4 if meta["src"] == "a" else 0.25)
+        return logits.masked_fill(~batch.option_mask, float("-inf"))
+
+
+def _fixed_views(source, group, canonical_id):
+    return [
+        {
+            "state": "context",
+            "questions": {
+                "decision": {
+                    "type": "choice", "instructions": "question",
+                    "criteria": {key: None for key in (["gold", *[f"d{n}" for n in range(k - 1)]])},
+                    "label": "gold", "src": source,
+                }
+            },
+            "_meta": {
+                "id": f"{canonical_id}/k{k}", "canonical_id": canonical_id,
+                "group_id": group, "source": source, "variant": "clean", "k": k,
+            },
+        }
+        for k in range(2, 7)
+    ]
+
+
 def _choice(record_id, label, pair_id=None, sibling=None, pair_kind=None, *, variant="clean", reverse=False):
     criteria = {"reject": None, "accept": None} if reverse else {"accept": None, "reject": None}
     meta = {"id": record_id, "group_id": record_id.rsplit("/", 1)[0], "variant": variant, "source": "fixture"}
@@ -77,7 +117,7 @@ def _choice(record_id, label, pair_id=None, sibling=None, pair_kind=None, *, var
 
 class DiagnosticsContracts(unittest.TestCase):
     def test_probe_selection_is_group_aware_and_order_independent(self):
-        records = [
+        records: list[dict] = [
             {"state": "b1", "_meta": {"id": "b/1", "group_id": "b"}},
             {"state": "a1", "_meta": {"id": "a/1", "group_id": "a"}},
             {"state": "b2", "_meta": {"id": "b/2", "group_id": "b"}},
@@ -202,6 +242,51 @@ class DiagnosticsContracts(unittest.TestCase):
                 "untyped_records": 0,
             },
         )
+
+    def test_canonical_report_weights_each_case_and_k_and_preserves_identity(self):
+        records = _fixed_views("a", "g1", "one") + _fixed_views("a", "g1", "two") + _fixed_views("b", "g2", "three")
+        model = _CanonicalModel().train()
+        random.seed(29)
+        np.random.seed(29)
+        torch.manual_seed(29)
+        python_state, numpy_state, torch_state = random.getstate(), np.random.get_state(), torch.get_rng_state().clone()
+
+        report = training_diagnostics(model, _Tokenizer(), records, device="cpu", max_packed=128)
+        canonical = report["canonical"]
+        self.assertEqual((canonical["views"], canonical["canonicals"], canonical["groups"]), (15, 3, 2))
+        self.assertEqual(canonical["chance_accuracy"], 0.29)
+        self.assertEqual({key: value["count"] for key, value in canonical["by_k"].items()}, {str(k): 3 for k in range(2, 7)})
+        self.assertEqual(canonical["by_source"]["a"]["canonicals"], 2)
+        self.assertEqual(canonical["by_source"]["a"]["groups"], 1)
+        self.assertEqual(canonical["by_source"]["b"]["views"], 5)
+        self.assertAlmostEqual(canonical["by_k"]["2"]["accuracy"], 2 / 3)
+        self.assertAlmostEqual(canonical["by_source"]["a"]["nll"],
+                               sum(math.log((k + 3) / 4) for k in range(2, 7)) / 5, delta=1e-6)
+        self.assertAlmostEqual(canonical["by_source"]["b"]["nll"],
+                               sum(math.log(4 * k - 3) for k in range(2, 7)) / 5, delta=1e-6)
+        self.assertAlmostEqual(canonical["macro_nll"], (canonical["by_source"]["a"]["nll"] + canonical["by_source"]["b"]["nll"]) / 2)
+        self.assertEqual(canonical["permutation"]["by_k"]["2"]["flips"], 0)
+        self.assertEqual(report, training_diagnostics(model, _Tokenizer(), records, device="cpu", max_packed=128))
+        self.assertTrue(model.training)
+        self.assertEqual(random.getstate(), python_state)
+        np.testing.assert_array_equal(np.random.get_state()[1], numpy_state[1])
+        self.assertTrue(torch.equal(torch.get_rng_state(), torch_state))
+        json.dumps(report)
+
+    def test_permutations_compare_candidate_content_not_position(self):
+        records = _fixed_views("a", "g1", "one") + _fixed_views("b", "g2", "two")
+        report = training_diagnostics(_CanonicalModel(positional_pair=True), _Tokenizer(), records,
+                                      device="cpu", max_packed=128)
+        flips = report["canonical"]["permutation"]
+        self.assertEqual((flips["canonicals"], flips["groups"], flips["views"]), (2, 2, 10))
+        self.assertEqual(flips["source_counts"]["a"], {"views": 5, "canonicals": 1, "groups": 1})
+        self.assertEqual(flips["by_k"]["2"]["orders"], 2)
+        self.assertEqual(flips["by_k"]["2"]["flips"], 2)
+        self.assertEqual(flips["by_k"]["2"]["count"], 2)
+        self.assertEqual(flips["by_k"]["3"]["orders"], 3)
+        self.assertEqual(flips["by_k"]["3"]["flips"], 0)
+        self.assertEqual(flips["by_source"]["b"]["2"]["flips"], 1)
+        self.assertEqual(report["canonical"]["accuracy"], 0.2)
 
 if __name__ == "__main__":
     unittest.main()

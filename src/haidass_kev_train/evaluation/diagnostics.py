@@ -167,6 +167,92 @@ def _choice_reorder(original: list[dict], reordered: list[dict]) -> dict:
     }
 
 
+def _canonical_report(rows: list[dict], records: list[dict], model, tokenizer, batch_size: int,
+                      device: str, max_packed: int, seed: int) -> dict:
+    """Fixed five-K metrics and key-aligned, same-membership permutation flips."""
+    cases: dict[str, dict[int, dict]] = {}
+    for row in rows:
+        cid, k = row["canonical_id"], row["k"]
+        if not isinstance(cid, str) or not cid or type(k) is not int or k not in range(2, 7):
+            raise ValueError("canonical diagnostics require canonical_id and K=2..6")
+        bucket = cases.setdefault(cid, {})
+        if k in bucket:
+            raise ValueError(f"duplicate fixed view for {cid}/k{k}")
+        bucket[k] = row
+    if any(set(views) != set(range(2, 7)) for views in cases.values()):
+        raise ValueError("canonical diagnostics require all five fixed K views per canonical")
+    if any(len({(r["src"], r["group_id"]) for r in views.values()}) != 1
+           for views in cases.values()):
+        raise ValueError("fixed views of one canonical must share source and group")
+    if any(row["question_type"] != "choice" or len(row["option_keys"]) != row["k"] for row in rows):
+        raise ValueError("canonical diagnostics require one choice question with K options per view")
+
+    def counts(group: list[dict]) -> dict:
+        return {"views": len(group), "canonicals": len({r["canonical_id"] for r in group}),
+                "groups": len({r["group_id"] for r in group})}
+
+    def metrics(group: list[dict]) -> dict:
+        return {**summarize(group), **counts(group)}
+
+    by_source = {src: {**metrics(group), "by_k": {str(k): metrics([r for r in group if r["k"] == k])
+                                                  for k in range(2, 7)}}
+                 for src, group in ((src, [r for r in rows if r["src"] == src])
+                                    for src in sorted({r["src"] for r in rows}))}
+    by_k = {str(k): metrics([r for r in rows if r["k"] == k]) for k in range(2, 7)}
+
+    ranked = sorted(cases, key=lambda cid: (hashlib.sha256(f"{seed}\0permutation\0{cid}".encode()).digest(), cid))
+    chosen = set(ranked[:200])
+    originals = {record["_meta"]["id"]: record for record in records}
+    alternates: list[dict] = []
+    for cid in ranked[:200]:
+        for k in range(2, 7):
+            row = cases[cid][k]
+            record = originals[row["record_id"]]
+            keys = list(record["questions"]["decision"]["criteria"])
+            for offset in range(1, 2 if k == 2 else 3):
+                shifted = keys[offset:] + keys[:offset]
+                alternate = {**record, "questions": {**record["questions"],
+                             "decision": {**record["questions"]["decision"],
+                                          "criteria": {key: record["questions"]["decision"]["criteria"][key]
+                                                       for key in shifted}}}}
+                alternates.append(alternate)
+    alternate_rows = predict(model, [encode_record(record, tokenizer, max_packed=max_packed) for record in alternates],
+                             batch_size=batch_size, device=device)
+    alternate_index: dict[tuple[str, int], list[dict]] = {}
+    for row in alternate_rows:
+        alternate_index.setdefault((row["canonical_id"], row["k"]), []).append(row)
+
+    def flip_stats(keys: list[tuple[str, int]]) -> dict:
+        flipped = sum(len({_predicted_key(cases[cid][k]), *(_predicted_key(row) for row in alternate_index[cid, k])}) > 1
+                      for cid, k in keys)
+        return {"flips": flipped, "count": len(keys), "rate": flipped / len(keys) if keys else None}
+
+    for cid in chosen:
+        for k in range(2, 7):
+            original = cases[cid][k]
+            reordered = alternate_index[cid, k]
+            if len(reordered) != (1 if k == 2 else 2):
+                raise ValueError(f"incomplete permutation diagnostic for {cid}/k{k}")
+            for other in reordered:
+                _choice_reorder([original], [other])
+
+    selected_rows = [row for row in rows if row["canonical_id"] in chosen]
+    permutation = {**counts(selected_rows),
+                   "source_counts": {src: counts([row for row in selected_rows if row["src"] == src])
+                                     for src in sorted({row["src"] for row in selected_rows})},
+                   "by_k": {str(k): {**flip_stats([(cid, k) for cid in chosen]), "orders": 2 if k == 2 else 3}
+                            for k in range(2, 7)},
+                   "by_source": {src: {str(k): flip_stats([(cid, k) for cid in chosen
+                                                          if cases[cid][k]["src"] == src])
+                                       for k in range(2, 7)}
+                                 for src in sorted({cases[cid][2]["src"] for cid in chosen})}}
+    return {**metrics(rows), "chance_accuracy": 0.29,
+            "evaluation": {"temperature": 1.0, "model_precision": "model_forward",
+                           "log_probability_dtype": "float32", "aggregation_dtype": "float64",
+                           "nll": "natural_log", "reduction": "equal_case_equal_k"},
+            "by_source": by_source, "by_k": by_k, "permutation": permutation}
+
+
 def training_diagnostics(
     model,
     tokenizer,
@@ -175,6 +261,7 @@ def training_diagnostics(
     batch_size: int = 4,
     device: str = "cuda",
     max_packed: int = 2048,
+    seed: int = 0,
 ) -> dict:
     """Return raw training-time diagnostics without consuming training RNG state."""
     indexed = _records_by_id(records)
@@ -196,13 +283,18 @@ def training_diagnostics(
         tasks: dict[str, list[dict]] = {}
         for row in clean:
             tasks.setdefault(row["src"], []).append(row)
-        return {
+        report = {
             "all": summarize(rows),
             "clean": summarize(clean),
             "tasks": {task: summarize(task_rows) for task, task_rows in tasks.items()},
             "paired_flip": _paired_flip(clean, indexed),
             "choice_reorder": _choice_reorder(rows, reordered),
         }
+        if any((record.get("_meta") or {}).get("canonical_id") is not None for record in records):
+            if len(clean) != len(records) or any((record.get("_meta") or {}).get("canonical_id") is None for record in records):
+                raise ValueError("canonical diagnostics require only fixed clean views")
+            report["canonical"] = _canonical_report(clean, records, model, tokenizer, batch_size, device, max_packed, seed)
+        return report
     finally:
         model.train(was_training)
         random.setstate(python_state)

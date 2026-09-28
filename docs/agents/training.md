@@ -165,9 +165,93 @@ unchanged); overflow or structural-marker collisions reject the record, never tr
 Canonical content, the suite manifest, and the sampling configuration join the resume
 identity: changed data or policy fails resume instead of starting a different experiment.
 
+Canonical diagnostics add `report.canonical`: raw equal-case/equal-K accuracy/NLL,
+per-source and per-K metrics, distinct view/canonical/group counts, the 29% random
+baseline, and content-aligned permutation flips for at most 200 fixed cases
+(two orders for K=2, three otherwise). `initialization.json` binds the initial
+development report to the resume identity; `metrics.jsonl` records each source's
+comparison against that initialization and distinguishes the NLL-selected best
+checkpoint from the final checkpoint. Neither training probes nor permutations
+select checkpoints.
+
 ```bash
 uv run --no-sync python -m haidass_kev_train.training.sft --config <canonical-config.toml> --output <output>
 ```
+
+### Offline UFW short-answer builder (ticket #23)
+
+The public library entry is `haidass_kev_train.data.build.build(config: dict, output: Path | str) -> dict`.
+It streams **original** `ultrafineweb_{en,zh}_l3/qa/*.parquet` locally and publishes
+`train.jsonl`, `development.jsonl`, `summary.json`, then `manifest.json` as one atomic
+directory rename. The train/development files contain canonical records only; load with
+`load_canonical_suite(path, split)`. Never point it at `qa_cleaned/` or `multi_style/`.
+
+Example bounded configuration (paths must exist; choose an unused output directory):
+
+```toml
+seed = 42
+split_seed = 42
+target = 2
+max_attempts = 6
+max_seconds = 180
+timeout = 30
+tokenizer_path = "models/base/haidass1.5-143m"
+generator_tokenizer_path = "/mnt/models/MODELS/Qwen3.8-27B"
+max_packed = 1024
+max_answer_tokens = 32
+max_source_tokens = 8192
+max_context_tokens = 32768
+max_output_tokens = 512
+
+[sources]
+ufw-en = "/mnt/data/Ultra-FineWeb-L3/data/ultrafineweb_en_l3/qa"
+ufw-zh = "/mnt/data/Ultra-FineWeb-L3/data/ultrafineweb_zh_l3/qa"
+
+[source_targets]
+ufw-en = 1
+ufw-zh = 1
+```
+
+```bash
+uv run --no-sync python -m haidass_kev_train.data.build \
+  --config <build.toml> --output data/processed/ufw-short-answer-trial
+```
+
+This command **does call** `http://110.123.0.3:8000/v1/chat/completions` with exact model
+`qwen3.8-27b`; obtain authorization before running it, even with small bounds. Optional
+`api_key_env = "YOUR_ENV_VAR_NAME"` refers to an environment variable, never a key in the
+config/artifact. HTTP is not confidential transport; only the selected state/question/
+source answer and screening candidates are sent, not the complete corpus. The first
+real-source call requires a separately authorized minimal non-sensitive service probe
+for final JSON, thinking=false, usage and truncation; API metadata alone does not verify it.
+All UFW requests explicitly disable thinking. The Haidass tokenizer checks all six
+training candidates, while the separately pinned Qwen tokenizer and its rendered chat
+template measure each generator request against the context limit **including**
+`max_output_tokens` reserved for the answer; no source is truncated. Their local file
+hashes are frozen in the manifest. The Qwen path shown above is the local default;
+set it explicitly elsewhere, with its tokenizer and chat template present. Default
+ceilings are 100 accepted, 2000 requests **including failures/retries**, and four hours;
+CLI smaller bounds cannot increase those trial ceilings. HTTP bodies are bounded to
+1 MiB and each attempt has a total wall deadline. A timed-out daemon request may
+continue remotely; `in_flight_requests` reports still-running local attempts.
+
+The current conservative recovery accepts contiguous terminal English/Chinese
+`Question/Answer` or `问题/答案` short-answer annotations (including Q+A on the same line);
+it rejects uncertain boundaries, generator chat-role delimiter collisions and old
+multiple-choice/presentation-dependent forms.
+Assisted original-text location, original choice answer mapping and permissible
+presentation conversion belong to ticket #24. Only one cheaply eligible QA is selected
+per row by seed and stable source identity; rejection does not switch to another QA.
+Two bounded requests construct and independently screen source support, unique gold,
+wrongness and format. This is **model screening**, not a semantic proof or human data
+quality certification. Original source spans/hash and uid/row locator are persisted
+and checked. Same-document Source Groups are split 95/5 before requests; missing
+development or target coverage stays `complete=false`, never repaired by moving groups.
+Review `summary.json` for rejections, requests/usage, in-flight attempts, source
+counts, groups/splits, lengths and stop reason; `manifest.json` SHA/count verifies
+readable files even when a trial is explicitly incomplete.
+Neither a controlled HTTP test nor an incomplete suite
+is evidence of real service behavior, data quality, or readiness for Data Scaling.
 
 
 ### Optional W&B tracking

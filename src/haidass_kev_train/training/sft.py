@@ -203,6 +203,14 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
                 "development_sha256": digest(Path(config["suite_path"]) / "development.jsonl")}
     if config.get("data_format") == "canonical_choice_v1":
         identity["manifest_sha256"] = digest(Path(config["suite_path"]) / "manifest.json")
+        initialization_path = output / "initialization.json"
+        initialization_identity = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        initialization: dict
+        if resume:
+            initialization = json.loads(initialization_path.read_text())
+            if initialization["identity_sha256"] != initialization_identity:
+                raise ValueError("Resume initialization/data identity mismatch")
+            identity["initialization_sha256"] = digest(initialization_path)
     state = None
     if resume:
         state = torch.load(Path(resume) / "training_state.pt", map_location="cpu", weights_only=False)
@@ -237,6 +245,20 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
         development_records = load_suite(config["suite_path"], "development")
         probe = select_probe(train_records, config["probe_groups"], config["seed"])
 
+    if config.get("data_format") == "canonical_choice_v1" and not resume:
+        model.train()
+        baseline_report = training_diagnostics(
+            model, tokenizer, development_records, batch_size=config["eval_batch_size"],
+            device="cuda", max_packed=config["max_packed"], seed=config["seed"],
+        )
+        initialization = {"identity_sha256": initialization_identity, "report": baseline_report}
+        temporary = output / ".initialization.json.tmp"
+        temporary.write_text(json.dumps(initialization, sort_keys=True) + "\n")
+        os.replace(temporary, initialization_path)
+        identity["initialization_sha256"] = digest(initialization_path)
+    if config.get("data_format") == "canonical_choice_v1":
+        tracker.log("initialization", step=0, path=str(initialization_path),
+                    identity_sha256=initialization_identity, report=initialization["report"])
     model.to("cuda")
     parameters, optimizer_groups = _parameter_groups(model, config)
     optimizer = torch.optim.AdamW(optimizer_groups, weight_decay=config["weight_decay"])
@@ -322,11 +344,11 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
         improved = False
         if step % config["eval_interval"] == 0 or step == config["max_steps"]:
             probe_report = training_diagnostics(model, tokenizer, probe, batch_size=config["eval_batch_size"],
-                                                device="cuda", max_packed=config["max_packed"])
+                                                device="cuda", max_packed=config["max_packed"], seed=config["seed"])
             tracker.log("train_probe", step=step, record_ids=probe_ids, report=probe_report)
             report = training_diagnostics(model, tokenizer, development_records,
                                           batch_size=config["eval_batch_size"], device="cuda",
-                                          max_packed=config["max_packed"])
+                                          max_packed=config["max_packed"], seed=config["seed"])
             subset = config["development_selection"]
             score = report[subset]["macro_nll"]
             if score is None or not math.isfinite(score):
@@ -334,6 +356,18 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
             improved = score < best
             best = min(best, score)
             selection = {"split": "development", "subset": subset, "metric": "macro_nll", "value": score}
+            if config.get("data_format") == "canonical_choice_v1":
+                baseline = initialization["report"]["canonical"]
+                current = report["canonical"]
+                tracker.log("initialization_comparison", step=step,
+                            identity_sha256=initialization_identity,
+                            baseline_path=str(initialization_path),
+                            source={src: {
+                                "baseline_nll": stats["nll"], "nll": current["by_source"][src]["nll"],
+                                "nll_delta": current["by_source"][src]["nll"] - stats["nll"],
+                                "baseline_accuracy": stats["accuracy"],
+                                "accuracy": current["by_source"][src]["accuracy"],
+                            } for src, stats in baseline["by_source"].items()})
             tracker.log("development", step=step, selection=selection, report=report)
         if step % config["checkpoint_interval"] == 0 or step == target_step or improved:
             last_checkpoint = checkpoint(model, optimizer, scheduler, output, step, epoch, cursor, best, identity)
@@ -343,8 +377,12 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
                 temp.write_text(json.dumps({"checkpoint": last_checkpoint.name,
                                             "selection": selection}, sort_keys=True) + "\n")
                 os.replace(temp, output / "best.json")
+    final_evidence = {}
+    if config.get("data_format") == "canonical_choice_v1":
+        best_path = output / "best.json"
+        final_evidence["best_checkpoint"] = json.loads(best_path.read_text())["checkpoint"] if best_path.exists() else None
     tracker.log("finished" if step == config["max_steps"] else "paused", step=step,
-                checkpoint=str(last_checkpoint) if last_checkpoint else str(resume))
+                checkpoint=str(last_checkpoint) if last_checkpoint else str(resume), **final_evidence)
     tracker.finish()
 
 
