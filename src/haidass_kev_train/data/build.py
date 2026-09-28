@@ -31,6 +31,42 @@ from haidass_kev_train.data.ufw import Rejected, digest, iter_rows, parse, prepa
 
 
 _SCREEN_FIELDS = {"supported", "unique", "all_wrong", "same_format"}
+_POLICY_MODULES = ("build.py", "generation.py", "ufw.py", "finemath.py",
+                   "equivalence.py", "canonical.py", "packing.py")
+_VALIDATION_PATHS = ("ufw_model_screened", "finemath_programmatic", "finemath_llm_adjudicated")
+_TOKENIZER_ASSETS = frozenset((
+    "tokenizer.json", "tokenizer.model", "tokenizer_config.json", "special_tokens_map.json",
+    "added_tokens.json", "vocab.json", "vocab.txt", "vocab.tiktoken", "merges.txt",
+    "spiece.model", "spm.model", "sentencepiece.bpe.model", "chat_template.jinja", "config.json"))
+
+
+def _tokenizer_hashes(directory):
+    return {file.name: hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in sorted(directory.iterdir())
+            if file.is_file() and (file.name in _TOKENIZER_ASSETS
+                                   or file.name.startswith("tokenizer.") and file.suffix == ".json")}
+
+
+def _policy_identity(config, build_details):
+    """Describe generation/admission strategy without batch quota, seed or contents."""
+    strategy = {
+        "model": build_details["model"], "base_url": build_details["base_url"],
+        "prompt_version": build_details["prompt_version"], "thinking": build_details["thinking"],
+        "source_location": build_details["source_location"],
+        "sources": {source: str(Path(directory).resolve())
+                    for source, directory in sorted(config["sources"].items())},
+        "tokenizer_sha256": build_details["tokenizer_sha256"],
+        "generator_tokenizer_sha256": build_details["generator_tokenizer_sha256"],
+        "limits": {name: config[name] for name in ("max_packed", "max_answer_tokens",
+                    "max_source_tokens", "max_context_tokens", "max_output_tokens")},
+        # Code is part of the filter/extraction policy: editing a rule requires a new audit.
+        "implementation_sha256": {
+            name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
+            for name in _POLICY_MODULES},
+    }
+    return strategy
+
+
 
 
 def _valid_config(config, output):
@@ -212,6 +248,31 @@ def _publish(output, records, report, config):
     report["complete"] = (report["accepted"] >= config["target"] and
                           not any(report["unfilled_targets"].values()) and not report["empty_development"] and
                           report["stop_reason"] in ("accepted_target", "source_target"))
+    report["trial_status"] = "complete" if report["complete"] else "incomplete"
+    report["incomplete_reasons"] = (
+        (["target_underfilled"] if report["accepted"] < config["target"] else []) +
+        (["source_underfilled"] if any(report["unfilled_targets"].values()) else []) +
+        (["empty_development"] if report["empty_development"] else []) +
+        ([report["stop_reason"]] if report["stop_reason"] in (
+            "time_limit", "attempt_limit", "service_error", "configuration_error") else []))
+    report["source_distribution"] = {
+        source: {"accepted": report["accepted_by_source"].get(source, 0),
+                 "fraction": report["accepted_by_source"].get(source, 0) / report["accepted"] if report["accepted"] else 0,
+                 "target": config["source_targets"][source]}
+        for source in config["sources"]}
+    report["split_distribution"] = {
+        source: {"train": report["splits"]["train"]["sources"].get(source, 0),
+                 "development": report["splits"]["development"]["sources"].get(source, 0),
+                 "development_fraction": (
+                     report["splits"]["development"]["sources"].get(source, 0) /
+                     report["accepted_by_source"][source] if report["accepted_by_source"].get(source) else 0)}
+        for source in config["sources"]}
+    report["split_distribution"]["overall"] = {
+        "train": report["splits"]["train"]["records"],
+        "development": report["splits"]["development"]["records"],
+        "development_fraction": report["splits"]["development"]["records"] / report["accepted"] if report["accepted"] else 0}
+    report["unverified_validation_paths"] = [
+        name for name in _VALIDATION_PATHS if not report["validation_paths"].get(name)]
     resolved = {key: value for key, value in config.items() if key != "api_key_env"}
     resolved["api_key_env"] = config.get("api_key_env")  # name only; never persist its value
     manifest = {"format": "canonical_choice_v1", "complete": report["complete"],
@@ -223,15 +284,14 @@ def _publish(output, records, report, config):
                           "prompt_version": PROMPT_VERSION,
                           "source_location": "original-qa-content-or-finemath-text-character-spans",
                           "tokenizer": str(Path(config["tokenizer_path"]).resolve()),
-                          "tokenizer_sha256": {name: hashlib.sha256((Path(config["tokenizer_path"]) / name).read_bytes()).hexdigest()
-                                               for name in ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
-                                               if (Path(config["tokenizer_path"]) / name).is_file()},
+                          "tokenizer_sha256": _tokenizer_hashes(Path(config["tokenizer_path"])),
                           "generator_tokenizer": str(Path(config["generator_tokenizer_path"]).resolve()),
-                          "generator_tokenizer_sha256": {
-                              name: hashlib.sha256((Path(config["generator_tokenizer_path"]) / name).read_bytes()).hexdigest()
-                              for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
-                              if (Path(config["generator_tokenizer_path"]) / name).is_file()}},
+                          "generator_tokenizer_sha256": _tokenizer_hashes(Path(config["generator_tokenizer_path"]))},
                 "counts": report["splits"]}
+    manifest["build"]["policy"] = _policy_identity(config, manifest["build"])
+    manifest["build"]["policy_sha256"] = hashlib.sha256(json.dumps(
+        manifest["build"]["policy"], ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
     with tempfile.TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as scratch:
         staging = Path(scratch)
         for split, rows in by_split.items():

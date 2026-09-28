@@ -311,6 +311,79 @@ Neither controlled HTTP checks nor incomplete suites demonstrate real service
 behavior, source quality or readiness for scaling.
 `manifest.json` verifies file SHA/count even for explicitly incomplete trials.
 
+### First-trial Data Quality Gate (ticket #28)
+
+Only an authorized operator starts a real trial. Before sending real source rows, obtain
+permission for the smallest **non-sensitive** request to the pinned endpoint/model and
+observe strict final JSON, `chat_template_kwargs.enable_thinking` both off and on,
+reasoning separated from final content, usage, truncation/error behavior and finite
+timeout. A metadata GET or controlled-HTTP test is not that probe. The builder is
+invoked with the TOML example above, changing `target = 100` and source targets to
+`ufw-en = 30`, `ufw-zh = 30`, `finemath = 40`; default limits remain at most 2000
+attempts/four hours. This document does not authorize making those requests.
+
+The builder's `summary.json` is **machine trial status**, not a human quality result.
+The exact SHA-256 of `manifest.json` identifies this audited batch; the verified
+`manifest.build.policy_sha256` identifies the generation strategy independently of
+batch-specific files, seed and authorized quantity. A subsequent larger dataset may
+reuse a passing policy identity only if its strategy really matches; its file hashes
+and batch manifest hash must differ. Never edit a failing batch or replace bad rows
+to turn it into a passing batch.
+
+```bash
+uv run --no-sync python -m haidass_kev_train.data.quality prepare \
+  --suite data/processed/ufw-finemath-trial --output artifacts/quality/first-review
+# Inspect every line of first-review/review.jsonl against the original local Parquet;
+# independently write first-review/assessments.jsonl, one assessment for each case.
+uv run --no-sync python -m haidass_kev_train.data.quality report \
+  --suite data/processed/ufw-finemath-trial \
+  --review artifacts/quality/first-review/review.jsonl \
+  --assessments artifacts/quality/first-review/assessments.jsonl \
+  --output artifacts/quality/first-review/gate.json
+```
+
+`prepare_review(suite, output)` and `quality_gate(suite, review, assessments, output)`
+are equivalent Python entry points. Preparation verifies both frozen splits,
+group integrity, each source Parquet row, original uid or URL/snapshot, stable ID,
+raw-text SHA-256 and character spans; `review.jsonl` includes the original row
+text, question/answer/givens/old-option spans, canonical question/gold/five
+distractors, validation path, stable `case_id`, policy/batch identity and
+`trace_sha256`. Do not generate assessments from the builder or model.
+Each operator-written JSONL assessment has exactly:
+
+```json
+{"case_id":"<review.jsonl case_id>","batch_manifest_sha256":"<review.jsonl batch_manifest_sha256>","policy_sha256":"<review.jsonl policy_sha256>","trace_sha256":"<review.jsonl trace_sha256>","reviewer":"<human identity>","source_verified":true,"serious_error":false,"category":null,"reason":"","paths":[]}
+```
+
+Review source fidelity, unique gold, all five distractors and their pairwise
+equivalence, answer type/format shortcuts, ambiguity, MCQ conversion and
+FineMath solution leakage. Add `\"symbolic\"` and/or `\"unit\"` to `paths` **only
+after** personally inspecting those FineMath cases; source and validation paths
+are taken from verified records. Set `serious_error=true`, a nonempty `reason`
+and `category` to one of `wrong_gold`, `correct_distractor`, `ambiguity`,
+`changed_question`, `leakage`, `shortcut`, `source_mismatch`, `other` for serious
+findings. A source not independently verified must have a serious verdict.
+Record a merely cosmetic note in `reason` with null `category`; escalate when
+meaning or candidate quality changes.
+
+The gate report records `status` (`pass`, `fail`, `incomplete`), both identities,
+`accepted`, `audited`, `required_audited=100`, `severe_count`, examples with
+case locators, per-source/path coverage, `unverified_paths` and evidence paths.
+No assessments, fewer than 100 accepted or missing reviews are **incomplete**
+unless a serious finding already makes the audited batch fail. Only 100
+individually reviewed cases covering **ufw-en, ufw-zh and finemath**, with zero
+serious errors and a completed build, can pass; a completed 100-case batch
+missing any of those sources is incomplete. Synthetic assessments in tests
+prove status logic only, not a real human audit. Missing symbolic, unit or
+LLM-path cases stay unverified, not silently counted; unlike missing sources,
+these absent paths do not independently block a zero-serious gate.
+Keep review/assessments/reports private and access-controlled: Parquet rows may
+contain sensitive third-party text; do not upload them or credentials to issue
+comments, external review services or model inputs. No real backend call,
+100-case generation, human audit, overfit check or spending has been performed
+or authorized by these instructions.
+
+
 
 ### Optional W&B tracking
 
