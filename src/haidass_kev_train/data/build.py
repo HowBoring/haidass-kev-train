@@ -48,7 +48,7 @@ def _tokenizer_hashes(directory):
 
 
 def _policy_identity(config, build_details):
-    """Describe generation/admission strategy without batch quota, seed or contents."""
+    """Describe admission policy independent of batch offsets, quotas and selection seed."""
     strategy = {
         "model": build_details["model"], "base_url": build_details["base_url"],
         "prompt_version": build_details["prompt_version"], "thinking": build_details["thinking"],
@@ -73,8 +73,8 @@ def _valid_config(config, output):
     if not isinstance(config, dict):
         raise ValueError("build config must be a table")
     allowed = {"sources", "tokenizer_path", "generator_tokenizer_path", "seed", "split_seed",
-               "target", "source_targets", "max_attempts", "max_seconds", "timeout",
-               "max_packed", "max_answer_tokens", "max_source_tokens",
+               "target", "source_targets", "source_start_rows", "max_attempts", "max_seconds",
+               "timeout", "max_packed", "max_answer_tokens", "max_source_tokens",
                "max_context_tokens", "max_output_tokens", "api_key_env"}
     if set(config) - allowed:
         raise ValueError(f"unknown build configuration keys: {sorted(set(config) - allowed)}")
@@ -110,6 +110,10 @@ def _valid_config(config, output):
     if not isinstance(targets, dict) or set(targets) != set(sources) or any(
             isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in targets.values()):
         raise ValueError("source_targets must specify positive counts for each configured source")
+    offsets = config.setdefault("source_start_rows", {source: 0 for source in sources})
+    if (not isinstance(offsets, dict) or set(offsets) != set(sources) or
+            any(type(value) is not int or value < 0 for value in offsets.values())):
+        raise ValueError("source_start_rows must specify a non-negative integer for each configured source")
     if not isinstance(config.get("tokenizer_path"), str) or not Path(config["tokenizer_path"]).is_dir():
         raise ValueError("tokenizer_path must be a local pinned tokenizer directory")
     config.setdefault("generator_tokenizer_path", "/mnt/models/MODELS/Qwen3.8-27B")
@@ -328,8 +332,10 @@ def build(config: dict, output: str | Path) -> dict:
     generator = Generator(config, generator_tokenizer)
     started = time.monotonic()
     accepted_by_source: Counter[str] = Counter()
+    skipped_by_offset: Counter[str] = Counter()
     report: dict[str, Any] = {"scanned": 0, "accepted": 0, "duplicates": 0, "rejected": Counter(),
               "accepted_by_source": accepted_by_source, "scanned_by_source": Counter(),
+              "skipped_by_offset": skipped_by_offset,
               "program_relations": Counter(), "unknown_cases": 0, "program_rejected": 0,
               "llm_accepted": 0, "llm_rejected": 0, "stop_reason": "source_exhausted"}
     records = []
@@ -343,6 +349,10 @@ def build(config: dict, output: str | Path) -> dict:
     try:
         for source, language, shard, line, row in _source_rows(
                 config, lambda name: accepted_by_source[name] >= config["source_targets"][name]):
+            if skipped_by_offset[source] < config["source_start_rows"][source]:
+                generator.check()
+                skipped_by_offset[source] += 1
+                continue
             if report["accepted"] >= config["target"]:
                 report["stop_reason"] = "accepted_target"
                 break
@@ -511,6 +521,8 @@ def build(config: dict, output: str | Path) -> dict:
     report["accepted_by_source"] = dict(accepted_by_source)
     report["validation_paths"] = dict(Counter(record["_meta"]["validation"] for record, _ in records))
     report["scanned_by_source"] = dict(report["scanned_by_source"])
+    report["skipped_by_offset"] = {source: skipped_by_offset[source] for source in config["sources"]}
+    report["skipped_by_offset_total"] = sum(skipped_by_offset.values())
     report["rejected"] = dict(report["rejected"])
     report["program_relations"] = dict(report["program_relations"])
     report["groups_seen"] = {source: sum(n for src, _, n in group_counts if src == source)

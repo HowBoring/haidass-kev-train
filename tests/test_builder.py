@@ -331,6 +331,52 @@ class BuilderTests(unittest.TestCase):
                 build(self.config(), self.root / "suite")
         self.assertFalse((self.root / "suite").exists())
 
+    def test_source_start_rows_yield_disjoint_trials_with_same_audited_policy(self):
+        self.source("en", [("first", EN), ("second", EN)])
+        manifests = []
+        ids = []
+        for start in (0, 1):
+            output = self.root / f"batch-{start}"
+            with patch("urllib.request.urlopen", side_effect=[
+                    response({"distractors": DISTRACTORS}),
+                    response({"supported": True, "unique": True, "all_wrong": True, "same_format": True})]):
+                report = build(self.config(target=1, source_targets={"ufw-en": 1},
+                                           source_start_rows={"ufw-en": start}), output)
+            self.assertEqual(report["skipped_by_offset"]["ufw-en"], start)
+            self.assertEqual(report["scanned_by_source"]["ufw-en"], 1)
+            records = load_canonical_suite(output, "train") + load_canonical_suite(output, "development")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["_meta"]["source_ref"]["line"], start)
+            ids.append(records[0]["_meta"]["id"])
+            manifests.append(json.loads((output / "manifest.json").read_text())["build"])
+        self.assertNotEqual(ids[0], ids[1])
+        self.assertEqual(manifests[0]["policy_sha256"], manifests[1]["policy_sha256"])
+        self.assertEqual(manifests[0]["config"]["source_start_rows"], {"ufw-en": 0})
+        self.assertEqual(manifests[1]["config"]["source_start_rows"], {"ufw-en": 1})
+
+    def test_invalid_source_start_rows_refuses_before_network(self):
+        self.source("en", [("first", EN)])
+        for offset in ({"ufw-en": -1}, {"ufw-en": True}, {"ufw-zh": 0}, {}):
+            with self.subTest(offset=offset), patch("urllib.request.urlopen",
+                                                     side_effect=AssertionError("unexpected network")):
+                with self.assertRaisesRegex(ValueError, "source_start_rows"):
+                    build(self.config(source_start_rows=offset), self.root / "suite")
+        self.assertFalse((self.root / "suite").exists())
+
+    def test_deep_backend_json_is_retried_as_malformed_sample(self):
+        self.source("en", [("first", EN)])
+        deeply_nested = "[" * 1300 + "]" * 1300
+        for name, body in (("envelope", lambda: io.BytesIO(deeply_nested.encode())),
+                           ("final", lambda: response(deeply_nested))):
+            with self.subTest(name=name), patch("urllib.request.urlopen",
+                                                 side_effect=[body() for _ in range(3)]):
+                report = build(self.config(), self.root / f"deep-{name}")
+            self.assertEqual(report["attempts"], 3)
+            self.assertEqual(report["failures"]["malformed_response"], 3)
+            self.assertEqual(report["rejected"]["malformed_response"], 1)
+            self.assertEqual(load_canonical_suite(self.root / f"deep-{name}"), [])
+
+
 
 
 

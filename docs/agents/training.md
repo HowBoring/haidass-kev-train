@@ -214,6 +214,11 @@ ufw-en = 1
 ufw-zh = 1
 finemath = 1
 
+[source_start_rows]
+ufw-en = 0
+ufw-zh = 0
+finemath = 0
+
 ```
 
 ```bash
@@ -240,6 +245,18 @@ ceilings are 100 accepted, 2000 requests **including failures/retries**, and fou
 CLI smaller bounds cannot increase those trial ceilings. HTTP bodies are bounded to
 1 MiB and each attempt has a total wall deadline. A timed-out daemon request may
 continue remotely; `in_flight_requests` reports still-running local attempts.
+
+For a separately authorized, **disjoint** bounded batch, set `source_start_rows`
+to nonnegative offsets for every configured source and use a new output directory.
+The builder skips that many source rows per source in stable sorted shard/row order
+before any generation. `summary.json` records actual `skipped_by_offset` separately
+from contiguous post-offset `scanned_by_source`; an offset beyond an exhausted source
+does not fabricate rows. Resolved offsets are frozen in `manifest.json`, but excluded
+from its `build.policy_sha256` audited-strategy identity. Seeds, quotas and
+budgets are not part of that strategy identity. Aggregation separately requires
+the same frozen `manifest.build.config.split_seed`, matching policies,
+nonoverlapping source-row intervals and stable IDs. Additional batches require
+separate authorization; no single trial exceeds 100/2000/four hours.
 
 UFW bounds the raw original content before parsing or assisted dispatch and
 recovers original short-answer and original-choice questions deterministically
@@ -398,9 +415,58 @@ budget **before** observing training results. Do not move development records,
 repeat train records, resume with a changed budget, search seeds, or extend a
 failed run automatically.
 
+Each builder invocation remains capped at **100 machine-admitted / 2000
+attempts / four hours**; it cannot be turned into a 128-, 1000-, or 30000-case
+single run. After a real quality pass and **separate authorization for each
+additional finite batch**, set `source_start_rows` per source in a new builder
+TOML to the previous batch's starting row plus its
+`summary.json.scanned_by_source` count. Use the *same* source directories,
+`split_seed`, model, prompts, filter implementation and tokenizer/length
+policy; freeze each offset, seed, source quota and budget before dispatch.
+Review actual `summary.json.skipped_by_offset` and scan intervals: offsets
+partition source traversal, not accepted records. Every batch must have its
+own completed manifest; a partial or exhausted batch cannot be relabeled
+complete, and restarting never grants more generation budget.
+
+With enough **already authorized, completed** batches, merge offline:
+
+```bash
+uv run --no-sync python -m haidass_kev_train.data.aggregate \
+  --batch <original-100-case-suite> --batch <authorized-offset-batch-1> \
+  --batch <authorized-offset-batch-2> \
+  --quality <audited-quality-report.json> \
+  --audited-suite <original-100-case-suite> \
+  --review <review.jsonl> --assessments <human-assessments.jsonl> \
+  --minimum-train 128 --output <new-combined-suite>
+```
+
+The aggregate command rechecks all 100 human assessments against the original
+Parquet, each source batch's manifest hashes/counts and stable source identities,
+unchanged audited build policy and split seed, nonoverlapping per-source scanned
+row intervals, and train/development Source Group integrity. Repeated stable
+canonical IDs with the same supervision and Source Trace (apart from physical
+shard/row locator) collapse to one case, retaining the first verified locator;
+conflicting content or split, missing three-source train/development coverage,
+fewer than the declared **distinct train canonicals**, or any incomplete input
+blocks publication. It copies *all* valid train and
+development canonicals without truncating, migrating or borrowing groups.
+`manifest.aggregation` records every input manifest/summary checksum, accepted
+and deduplicated totals and requested minimum. `manifest.build.config` is a
+representative **source batch**: its target, offsets and budget are *not* the
+aggregate's target or totals. For a separately authorized pilot use a new
+aggregate with `--minimum-train 1000` (actual pilot 1k–5k); for full use a
+separately authorized ~30k target. Aggregate creation never launches generation
+or training; the pilot's ≥50 independent development groups per source are
+checked by the later scaling gate, not fabricated by merging view counts.
+
+Point `training.overfit --suite` below at `<new-combined-suite>` once it
+contains 128 distinct train canonicals. The first audited batch may itself be
+one input; sharing its *unchanged train records* is permitted, but development
+records cannot be borrowed to fill the 128 train cases.
+
 ```bash
 uv run --no-sync python -m haidass_kev_train.training.overfit \
-  --suite <later-completed-builder-suite> \
+  --suite <new-combined-suite> \
   --quality <audited-quality-report.json> \
   --audited-suite <original-100-case-suite> \
   --review <review.jsonl> --assessments <human-assessments.jsonl> \

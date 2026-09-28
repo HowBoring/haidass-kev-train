@@ -166,7 +166,7 @@ class Generator:
                     if not isinstance(result, dict) or not required(result):
                         raise ValueError("invalid task schema")
                     return result
-                except (ValueError, TypeError, KeyError, IndexError):
+                except (ValueError, TypeError, KeyError, IndexError, RecursionError):
                     self.failures["malformed_response"] += 1
                     if retry == 2:
                         return None

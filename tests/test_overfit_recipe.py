@@ -17,6 +17,36 @@ from haidass_kev_train.training.overfit import prepare_overfit
 from haidass_kev_train.training.sft import _canonical_data, _config
 
 
+def base_config(root: Path, tokenizer: Path) -> Path:
+    path = root / "base.toml"
+    path.write_text(f'''base_path = "{tokenizer}"
+        suite_path = "unused-superseded-by-recipe"
+        seed = 7
+        batch_size = 2
+        gradient_accumulation = 2
+        learning_rate = 0.0002
+        weight_decay = 0.01
+        max_steps = 12
+        warmup_steps = 1
+        scheduler = "cosine"
+        eval_interval = 3
+        checkpoint_interval = 3
+        max_packed = 1024
+        eval_batch_size = 4
+        max_grad_norm = 1.0
+        training_mode = "lora"
+        probe_groups = 10
+        development_selection = "clean"
+        [augmentation]
+        shuffle = true
+        p_none = 0.0
+        p_none_distract = 0.0
+        p_distract = 0.0
+        p_none_pair = 0.0
+        ''')
+    return path
+
+
 class OverfitRecipeTests(unittest.TestCase):
     root: Path
     tokenizer: Path
@@ -64,33 +94,7 @@ class OverfitRecipeTests(unittest.TestCase):
         return suite
 
     def base_config(self):
-        path = self.root / "base.toml"
-        path.write_text(f'''base_path = "{self.tokenizer}"
-        suite_path = "unused-superseded-by-recipe"
-        seed = 7
-        batch_size = 2
-        gradient_accumulation = 2
-        learning_rate = 0.0002
-        weight_decay = 0.01
-        max_steps = 12
-        warmup_steps = 1
-        scheduler = "cosine"
-        eval_interval = 3
-        checkpoint_interval = 3
-        max_packed = 1024
-        eval_batch_size = 4
-        max_grad_norm = 1.0
-        training_mode = "lora"
-        probe_groups = 10
-        development_selection = "clean"
-        [augmentation]
-        shuffle = true
-        p_none = 0.0
-        p_none_distract = 0.0
-        p_distract = 0.0
-        p_none_pair = 0.0
-        ''')
-        return path
+        return base_config(self.root, self.tokenizer)
 
     def evidence(self):
         audited, review, cases = self.trial(100)
