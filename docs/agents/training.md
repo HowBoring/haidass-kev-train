@@ -383,6 +383,103 @@ comments, external review services or model inputs. No real backend call,
 100-case generation, human audit, overfit check or spending has been performed
 or authorized by these instructions.
 
+### Audited 128-case overfit and bounded scaling decision (ticket #29)
+
+These are **offline preparation and read-only evidence commands**, never a
+generation, GPU training, human-review, or spending authorization. First
+obtain a real, independently written 100-case `quality_gate` pass against the
+original Parquet and operator assessments as above. Obtain separate permission
+to construct a later completed suite with enough distinct train canonicals,
+using the identical `manifest.build.policy_sha256` generation strategy; its
+batch manifest SHA may differ and its records need not be disjoint from the
+audited batch. Freeze its train/development files, seed, source groups,
+tokenizer, optimizer configuration, evaluation and finite optimizer-update
+budget **before** observing training results. Do not move development records,
+repeat train records, resume with a changed budget, search seeds, or extend a
+failed run automatically.
+
+```bash
+uv run --no-sync python -m haidass_kev_train.training.overfit \
+  --suite <later-completed-builder-suite> \
+  --quality <audited-quality-report.json> \
+  --audited-suite <original-100-case-suite> \
+  --review <review.jsonl> --assessments <human-assessments.jsonl> \
+  --base-config <reviewed-canonical-sft.toml> \
+  --output <new-overfit-recipe-directory>
+```
+
+The base config must be an actual public SFT TOML with a pinned local
+`base_path`, tokenizer and finite `max_steps` (at most 500), not a placeholder
+path; `eval_interval = checkpoint_interval <= max_steps` ensures every probe
+event has its own saved checkpoint. This command verifies the audited evidence
+against the original source, same policy, frozen suite and tokenizer preflight,
+then writes `suite/` with **exactly 128 distinct original train canonicals
+across all three sources**, unmodified parent development, `config.toml` for
+the existing SFT, and provenance `plan.json`. `probe_groups=128` covers all
+train groups, yielding 640 fixed five-K probe views (not 640 independent
+cases); training still samples candidates anew each epoch. The recipe retains
+the supplied seed, optimizer and update budget, and does not train.
+
+Only after explicit GPU authorization, run the existing public trainer with
+`--config <recipe>/config.toml --output <new-overfit-run>`. The existing
+four-update `configs/training/pilot.toml` is only an engineering smoke, not
+overfit evidence. A real check requires the same saved optimizer-update
+checkpoint at or below 500 where **every K=2..6 accuracy is ≥0.95 and raw
+natural-log, equal-case/equal-K NLL is ≤0.15**. Missing probe rows, a smaller
+probe, nonfinite gradients, identity mismatch or unfinished updates do not
+grant the next stage. Diagnose labels, mapping, mask, gradients and data
+without changing a running budget.
+
+After separately authorizing an actual 1k–5k train-canonical Data Pilot,
+freeze its completed builder suite, config (explicit positive `max_steps`,
+seed, source selection and `development_selection = \"clean\"`), fixed
+development, initial checkpoint and evaluation policy before training. The
+approximately 30k full target is another separately authorized finite run;
+these sizes are not automatic actions. Run the same public SFT entry point,
+retaining each run's `metrics.jsonl`, `initialization.json`, `best.json`,
+`config.toml`, selected `step-*` and final checkpoint. Then consume them:
+
+```bash
+uv run --no-sync python -m haidass_kev_train.evaluation.gates \
+  --quality <audited-quality-report.json> \
+  --audited-suite <original-100-case-suite> \
+  --review <review.jsonl> --assessments <human-assessments.jsonl> \
+  --overfit-suite <recipe>/suite --overfit-config <recipe>/config.toml \
+  --overfit-run <actual-overfit-run> \
+  --pilot-suite <actual-pilot-suite> --pilot-config <frozen-pilot.toml> \
+  --pilot-run <actual-pilot-run> --output <new-decision-report.json>
+```
+
+`--full-suite`, `--full-config` and `--full-run` optionally report an actual
+~30k full run. Missing stages may be omitted and remain `incomplete`; output
+path must be new. Each gate has `pass`, `fail` or `incomplete` with evidence
+locations. Inconsistent hashes/identity or observed threshold failures
+block. The consumer regenerates the first quality verdict from original
+Parquet plus human assessment files; an isolated `\"status\":\"pass\"` JSON is
+not audit evidence. It verifies policy equality, derived subset provenance,
+training-log update steps, stored checkpoints, frozen SFT initialization
+identity and canonical diagnostic denominators. Evaluate with the same
+software/runtime/resource pins as training because the initialization
+identity includes PyTorch/CUDA versions and `configs/resources.toml`.
+Training artifacts are trusted local files, not tamper-proof attestations.
+
+Pilot-to-full recommendation additionally needs all quality/engineering/
+overfit prerequisites, all three development sources with at least **50
+independent Source Groups each**, and the existing development
+**source-macro-NLL-selected best checkpoint** (not the final checkpoint
+unless identical) at raw T=1 five-K equal-case accuracy ≥0.34 *per source*,
+with NLL below the same persisted initialization on the identical
+development. Inadequate coverage is `incomplete`, not an invitation to move
+or reuse cases. Inspect the reported source/K buckets and deterministic
+candidate-content-aligned permutation flips (two orders at K=2, three
+otherwise, at most 200 distinct cases); no hard flip cutoff exists and stable
+incorrect predictions are still incorrect. A `recommend_full` true indicates
+only development learning signal and a reason to request human review and
+separate resources; neither a successful pilot nor a full run establishes
+calibration, statistical significance, OOD generalization, or SFT Complete.
+No human audit, authorized real BF16 CUDA overfit/reload/resume, pilot or full
+run has been performed by publishing this recipe.
+
 
 
 ### Optional W&B tracking

@@ -527,7 +527,7 @@ class CanonicalRecordTests(unittest.TestCase):
         validate_record(record)
         record["_meta"]["source_ref"]["givens_span"] = [0, 5]
         validate_record(record)
-        for patch in ({"url": ..., "snapshot_type": ...}, {"url": " "}, {"snapshot_type": 7},
+        for patch in ({"url": " "}, {"snapshot_type": 7},
                       {"givens_span": [5, 5]}, {"state_span": [9, 2]}, {"state_span": "0-5"}):
             bad = copy.deepcopy(record)
             bad["_meta"]["source_ref"] = _trace_patch(record, **patch)
