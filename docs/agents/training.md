@@ -142,6 +142,34 @@ Omit `--plan-only` to execute the explicit arms serially. The comparison refuses
 outputs and budgets incompatible with the configured warmup. Each arm records its resolved
 configuration, provenance, and selected development checkpoint; no test-based promotion occurs.
 
+### Canonical dynamic-candidate input (`canonical_choice_v1`)
+
+A Frozen Decision Suite of Canonical Decision Records enters the same trainer with
+`data_format = "canonical_choice_v1"`; its absence keeps the Kev record path unchanged.
+Train and development JSONL store canonical records (`source`/`state`/`question`/`gold` plus
+exactly five distinct `distractors`, `_meta` carrying stable `id`, `group_id`, matching
+`source`, a `source_ref` Source Trace (shard path, row locator, raw-text SHA-256, and
+zero-based half-open question/answer spans), and the Candidate Validation Path in
+`validation`; see `haidass_kev_train.data.canonical`), never fixed position labels. The
+loader reuses manifest SHA-256/count verification and checks train/development group
+integrity. Each epoch materializes one Decision View per canonical (K=2..6 from
+`[canonical] k_probabilities`, default 0.10/0.20/0.30/0.25/0.15; K−1 distractors without
+replacement, gold retained, full shuffle; keyed by seed/epoch/record id, order- and
+worker-independent). Development and the Training Probe evaluate five fixed views per
+canonical, one per K with `<id>/k<K>` view ids and `clean` semantics, independent of epoch
+and training RNG. Canonical mode performs no legacy augmentation: `shuffle` must be `false`
+and every augmentation probability 0, and an explicitly conflicting setting is an error.
+All six candidates are preflighted through the pinned tokenizer and encoder at the
+configured `max_packed` (start new canonical recipes at 1024; old Kev 2048 presets are
+unchanged); overflow or structural-marker collisions reject the record, never truncate.
+Canonical content, the suite manifest, and the sampling configuration join the resume
+identity: changed data or policy fails resume instead of starting a different experiment.
+
+```bash
+uv run --no-sync python -m haidass_kev_train.training.sft --config <canonical-config.toml> --output <output>
+```
+
+
 ### Optional W&B tracking
 
 Set `WANDB_ENTITY` to the stable team name. Pass `--wandb-project <project>` to

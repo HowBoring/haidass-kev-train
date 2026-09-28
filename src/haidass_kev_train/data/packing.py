@@ -355,8 +355,11 @@ def collate(records: list[EncodedRecord], pad_token_id: int = 0) -> PackedDecisi
 # --------------------------------------------------------------------------------------- suites
 
 
-def load_suite(path, split: str = "train") -> list[dict]:
-    """One frozen suite split, verified against the suite manifest's SHA-256, with stable identities."""
+def load_suite(path, split: str = "train", *, validate=None) -> list[dict]:
+    """One frozen suite split, verified against the suite manifest's SHA-256, with stable identities.
+
+    ``validate``, when given, runs on each raw record before identity defaults are filled.
+    """
     path = Path(path)
     manifest_path = path / "manifest.json"
     if not manifest_path.is_file():
@@ -376,6 +379,8 @@ def load_suite(path, split: str = "train") -> list[dict]:
     if declared is not None and len(records) != declared:
         raise ValueError(f"{path}/{name}: {len(records)} records, manifest declares {declared}")
     for index, record in enumerate(records):
+        if validate is not None:
+            validate(record)
         record["_meta"] = _identity(record, f"{path.name}/{split}/{index}")
     return records
 

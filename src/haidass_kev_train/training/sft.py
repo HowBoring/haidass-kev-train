@@ -15,7 +15,8 @@ import numpy as np
 import torch
 
 from haidass_kev_train.data.augmentation import augment_record
-from haidass_kev_train.data.packing import collate, encode_record, load_suite
+from haidass_kev_train.data.canonical import check_k_probabilities, evaluation_views, load_canonical_suite, preflight, training_view
+from haidass_kev_train.data.packing import check_group_integrity, collate, encode_record, load_suite
 from haidass_kev_train.evaluation.diagnostics import select_probe, training_diagnostics
 from haidass_kev_train.evaluation.metrics import per_question_ce
 from haidass_kev_train.model.decision import build_model, load_artifact, save_artifact
@@ -106,13 +107,28 @@ def _config(path):
     allowed = {"shuffle", "p_none", "p_none_distract", "p_distract", "p_none_pair"}
     if not isinstance(augmentation, dict) or set(augmentation) - allowed:
         raise ValueError(f"Invalid augmentation configuration: {set(augmentation) - allowed if isinstance(augmentation, dict) else augmentation!r}")
+    data_format = config.get("data_format")
+    if data_format is not None:
+        if data_format != "canonical_choice_v1":
+            raise ValueError(f"data_format must be 'canonical_choice_v1' when set, got {data_format!r}")
+        if augmentation.get("shuffle") or any(augmentation.get(key) for key in ("p_none", "p_none_distract", "p_distract", "p_none_pair")):
+            raise ValueError("canonical_choice_v1 performs its own candidate sampling; set shuffle=false and all augmentation probabilities to 0")
+        canonical = config.setdefault("canonical", {})
+        if not isinstance(canonical, dict):
+            raise ValueError("canonical must be a table")
+        canonical["k_probabilities"] = check_k_probabilities(canonical.get("k_probabilities"))
     return config
 
 
 def _epoch_records(records, tokenizer, config, epoch):
-    augmented = [item for record in records for item in augment_record(
-        record, seed=config["seed"], epoch=epoch, **config["augmentation"])]
-    encoded = [encode_record(record, tokenizer, max_packed=config["max_packed"]) for record in augmented]
+    if config.get("data_format") == "canonical_choice_v1":
+        views = [training_view(record, seed=config["seed"], epoch=epoch,
+                               probabilities=config["canonical"]["k_probabilities"])
+                 for record in records]
+    else:
+        views = [item for record in records for item in augment_record(
+            record, seed=config["seed"], epoch=epoch, **config["augmentation"])]
+    encoded = [encode_record(record, tokenizer, max_packed=config["max_packed"]) for record in views]
     if not encoded:
         raise ValueError("Empty augmented train data")
     order = list(range(len(encoded)))
@@ -144,6 +160,33 @@ def _grad_norm(parameters):
     return float(torch.stack(squared).sum().sqrt()) if squared else 0.0
 
 
+def _canonical_data(config, tokenizer):
+    """Validated canonical train records plus fixed development/probe Decision Views.
+
+    Train records stay canonical; each epoch materializes one view in ``_epoch_records``.
+    Diagnostics only ever see materialized views: five fixed views (K=2..6) per canonical.
+    """
+    integrity = check_group_integrity(config["suite_path"], splits=("train", "development"))
+    overlap = integrity["overlaps"].get("train|development", 0)
+    if overlap:
+        raise ValueError(f"canonical suite has {overlap} group(s) in both train and development")
+    train_records = load_canonical_suite(config["suite_path"], "train")
+    if config.get("train_sources") is not None:
+        selected = set(config["train_sources"])
+        train_records = [record for record in train_records if record["_meta"]["source"] in selected]
+    if not train_records:
+        raise ValueError("Empty train data")
+    development = load_canonical_suite(config["suite_path"], "development")
+    if not development:
+        raise ValueError("Empty development data")
+    preflight([*train_records, *development], tokenizer, max_packed=config["max_packed"])
+    seed = config["seed"]
+    development_views = [view for record in development for view in evaluation_views(record, seed=seed, purpose="development")]
+    probe_views = [view for record in select_probe(train_records, config["probe_groups"], seed)
+                   for view in evaluation_views(record, seed=seed, purpose="probe")]
+    return train_records, development_views, probe_views
+
+
 def train(config_path, output, resume=None, stop_after=None, *, wandb_project=None, wandb_name=None, wandb_group=None):
     config_path, output = Path(config_path), Path(output)
     config = _config(config_path)
@@ -158,6 +201,8 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
                             "cublas_workspace": ":4096:8", "tf32": True},
                 "train_sha256": digest(Path(config["suite_path"]) / "train.jsonl"),
                 "development_sha256": digest(Path(config["suite_path"]) / "development.jsonl")}
+    if config.get("data_format") == "canonical_choice_v1":
+        identity["manifest_sha256"] = digest(Path(config["suite_path"]) / "manifest.json")
     state = None
     if resume:
         state = torch.load(Path(resume) / "training_state.pt", map_location="cpu", weights_only=False)
@@ -180,14 +225,17 @@ def train(config_path, output, resume=None, stop_after=None, *, wandb_project=No
     log_path = output / "metrics.jsonl"
     tracker = TrainingTracker(log_path, output, project=wandb_project, name=wandb_name, group=wandb_group)
 
-    train_records = load_suite(config["suite_path"], "train")
-    if config.get("train_sources") is not None:
-        selected = set(config["train_sources"])
-        train_records = [record for record in train_records if record.get("_meta", {}).get("source") in selected]
-    if not train_records:
-        raise ValueError("Empty train data")
-    development_records = load_suite(config["suite_path"], "development")
-    probe = select_probe(train_records, config["probe_groups"], config["seed"])
+    if config.get("data_format") == "canonical_choice_v1":
+        train_records, development_records, probe = _canonical_data(config, tokenizer)
+    else:
+        train_records = load_suite(config["suite_path"], "train")
+        if config.get("train_sources") is not None:
+            selected = set(config["train_sources"])
+            train_records = [record for record in train_records if record.get("_meta", {}).get("source") in selected]
+        if not train_records:
+            raise ValueError("Empty train data")
+        development_records = load_suite(config["suite_path"], "development")
+        probe = select_probe(train_records, config["probe_groups"], config["seed"])
 
     model.to("cuda")
     parameters, optimizer_groups = _parameter_groups(model, config)
