@@ -1,0 +1,29 @@
+# One approximate raw-record pass; source quality has not been human reviewed.
+base_path = "models/base/haidass1.5-143m"
+suite_path = "data/raw/haidass-kev-ufw-finemath-unreviewed-30k"
+data_format = "canonical_choice_v1"
+train_sources = ["ufw-en", "ufw-zh", "finemath"]
+seed = 42
+batch_size = 4
+gradient_accumulation = 4
+learning_rate = 0.0002
+head_learning_rate = 0.0002
+weight_decay = 0.01
+max_steps = 2190
+warmup_steps = 109
+scheduler = "cosine"
+eval_interval = 200
+checkpoint_interval = 200
+max_packed = 1024
+eval_batch_size = 4
+max_grad_norm = 1.0
+training_mode = "lora"
+probe_groups = 64
+development_selection = "clean"
+
+[augmentation]
+shuffle = false
+p_none = 0.0
+p_none_distract = 0.0
+p_distract = 0.0
+p_none_pair = 0.0

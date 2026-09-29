@@ -46,7 +46,7 @@ class HumanGateSoftwareTests(unittest.TestCase):
         self.qwen = self.root / "qwen"
         chat.save_pretrained(self.qwen)
 
-    def trial(self, count, *, only_math=False):
+    def trial(self, count, *, only_math=False, shard_count=1):
         en = self.root / "ultrafineweb_en_l3" / "qa"
         zh = self.root / "ultrafineweb_zh_l3" / "qa"
         math = self.root / "finemath-4plus"
@@ -68,11 +68,16 @@ class HumanGateSoftwareTests(unittest.TestCase):
                       f"Question: What is {i}+1?\nAnswer: {i+1}"),
              "url": f"https://example.org/math/{i}", "snapshot_type": "latest"}
             for i in range(size_math)]), math / "part.parquet", row_group_size=16)
+        if shard_count > 1:
+            for directory in (en, zh, math):
+                original = directory / "part.parquet"
+                if original.is_file():
+                    pq.write_table(pq.read_table(original).slice(0, 1), directory / "zz.parquet")
         sources = {"finemath": str(math)} if only_math else {
             "ufw-en": str(en), "ufw-zh": str(zh), "finemath": str(math)}
         config = {"sources": sources,
                   "tokenizer_path": str(self.tokenizer), "generator_tokenizer_path": str(self.qwen),
-                  "seed": 17, "split_seed": 2, "target": count,
+                  "seed": 17, "split_seed": 2, "target": count, "shard_count": shard_count,
                   "source_targets": {source: {"ufw-en": size_en, "ufw-zh": size_zh,
                                                "finemath": size_math}[source] for source in sources},
                   "max_attempts": 250, "max_seconds": 900, "timeout": 2,

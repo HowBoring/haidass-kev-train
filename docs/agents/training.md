@@ -249,14 +249,18 @@ continue remotely; `in_flight_requests` reports still-running local attempts.
 For a separately authorized, **disjoint** bounded batch, set `source_start_rows`
 to nonnegative offsets for every configured source and use a new output directory.
 The builder skips that many source rows per source in stable sorted shard/row order
-before any generation. `summary.json` records actual `skipped_by_offset` separately
-from contiguous post-offset `scanned_by_source`; an offset beyond an exhausted source
+within its assigned lane before generation. `shard_count`/`shard_index` partition
+sorted Parquet files, then interleave original row numbers if lanes outnumber files;
+offsets and scan intervals are lane-local. `summary.json` records actual
+`skipped_by_offset` separately from contiguous post-offset `scanned_by_source`;
+an offset beyond an exhausted source
 does not fabricate rows. Resolved offsets are frozen in `manifest.json`, but excluded
 from its `build.policy_sha256` audited-strategy identity. Seeds, quotas and
 budgets are not part of that strategy identity. Aggregation separately requires
-the same frozen `manifest.build.config.split_seed`, matching policies,
-nonoverlapping source-row intervals and stable IDs. Additional batches require
-separate authorization; no single trial exceeds 100/2000/four hours.
+every batch's `manifest.build.config.split_seed` to match the audited 100-case
+suite, matching policies, nonoverlapping source-row intervals and stable IDs.
+Additional batches require separate authorization; no single trial exceeds
+100/2000/four hours.
 
 UFW bounds the raw original content before parsing or assisted dispatch and
 recovers original short-answer and original-choice questions deterministically
@@ -272,12 +276,20 @@ candidate generation and screening. `assisted_location`,
 `answer_mapping_ambiguous`, and `presentation_conversion` denote distinct
 rejections. Screening remains model judgement, not proof or human certification.
 
-FineMath extracts at most one labelled existing problem and final answer per webpage;
-original character spans, raw-text hash, URL and snapshot identify and trace it.
-A nonempty pre-question prefix must be retained as original-text givens or
-rejected; worked solutions, including unlabelled derivations after the
-question, do not enter model-visible state or question. Source gold is
-preserved, not regenerated or mathematically proved.
+FineMath recovers at most one original question and printed final answer per
+webpage. The labelled path verifies `Question:`/`Answer:` attribution and
+retains any necessary original-text givens; the unlabelled fallback calls
+Qwen with thinking and a task-specific strict JSON schema only when the raw
+page has `\boxed` or an explicit `(final) answer is` cue. It accepts only
+unique, exact source substrings for the question and answer evidence, with
+the answer a literal substring of that evidence after the question. Shared
+source-span, missing-figure, prohibited-conversion and solution-leakage
+checks still apply; worked solutions never enter model-visible question
+text. Raw-text hash, URL/snapshot and original character spans trace every
+gold answer. Unlabelled-page completeness remains model judgment, not a
+mathematical proof or a human quality pass. Other generator tasks still
+use `json_object`; local parsing rejects duplicate JSON keys and incomplete
+final responses.
 
 The bounded programmatic checker accepts exact signed integers, finite decimals,
 scientific notation, fractions, percentages, short case-sensitive identifier
@@ -458,6 +470,80 @@ aggregate with `--minimum-train 1000` (actual pilot 1k–5k); for full use a
 separately authorized ~30k target. Aggregate creation never launches generation
 or training; the pilot's ≥50 independent development groups per source are
 checked by the later scaling gate, not fabricated by merging view counts.
+
+For an explicitly authorized **unreviewed** build that bypasses the human
+gate and pilot (not a quality pass), the bounded runner partitions sorted
+Parquet shards into disjoint lanes and resumes from
+`summary.json.scanned_by_source`. The quick-training config uses 64 lanes
+(one per FineMath shard), 1024 output tokens, and per-100 source targets of
+47 UFW-en / 48 UFW-zh / 5 FineMath. This deliberately replaces the prior
+30/30/40 mix: a bounded real FineMath run accepted 1 original record in
+80 model requests and 1,374 scanned rows, which would exceed 2,000 attempts
+per batch at a 40-math target if repeated. This small sample is a sizing
+observation, not a corpus-wide yield or quality guarantee. The
+`blue-a3-host` deployment has 15 healthy single-chip vLLM replicas with
+`max_num_seqs=16`, so at most 240 sequences run simultaneously; the
+64 configured lanes stay within that limit. Each batch still admits at
+most 100 records, 2,000 attempts and four hours; failure freezes the
+batch and stops the run. The pinned model uses
+`http://110.123.0.3:8000/v1`, not port 8080:
+
+```bash
+uv run --no-sync python -m haidass_kev_train.data.bulk \
+  --config configs/data/ufw-finemath-unreviewed-30k-parallel.toml \
+  --output data/processed/ufw-finemath-unreviewed-30k-parallel-64 \
+  --minimum-train 30000
+```
+
+Bulk stdout emits a JSON `progress` heartbeat every 30 seconds with active
+and reporting lanes, in-flight scan/accept/attempt totals, current sources
+and top rejection counts; `batch_complete` records each frozen batch's
+accepted, attempted, scanned and elapsed totals. Neither event includes
+source text or request payloads. A reporting-lane count of zero means the
+workers have not reached source scanning, not that the endpoint is idle.
+
+Completed batches remain under `lane-XX/batch-NNNN`; the final suite is
+`<output>/suite`. Resume with the same command and unchanged config.
+Unreviewed aggregation checks policy, split, batch hashes, distinct train
+IDs and disjoint scan ranges per lane but records
+`manifest.aggregation.quality_status = "not_reviewed"` with **no human
+assessments or audit hashes**. It cannot serve as evidence of source
+quality or satisfy the audited overfit/scaling gates below.
+
+The first completed unreviewed suite is
+`data/processed/ufw-finemath-unreviewed-30k-parallel-64/suite`: 375
+complete batches produced 35,619 distinct train records (1,783 FineMath,
+16,720 UFW-en, 17,116 UFW-zh) and 1,881 development records (92 / 905 /
+884 respectively), with no train/development Source Group overlap.
+Four other frozen 100-record batches had empty development splits and were
+excluded. The suite manifest records `quality_status = "not_reviewed"`;
+source-answer correctness, unlabelled FineMath question completeness,
+model-screened distractors, and any corpus contamination still require
+subsequent independent acceptance checks before claiming dataset quality.
+This run constructs data only; it does not start model training or qualify
+the audited scaling gates.
+
+The private Hub mirror is
+`DALabCommunity/haidass-kev-ufw-finemath-unreviewed-30k`; its fixed
+revision is in `configs/resources.toml`. The mirror contains the unchanged
+manifest and both JSONL splits plus `training.toml`, ready for this
+framework's canonical loader. With organization access, from the
+repository root:
+
+```bash
+hf download DALabCommunity/haidass-kev-ufw-finemath-unreviewed-30k \
+  --type dataset \
+  --revision 0acdeaa17d9e90e40dfaaca23449c591ba7369c7 \
+  --local-dir data/raw/haidass-kev-ufw-finemath-unreviewed-30k
+uv run --no-sync python -m haidass_kev_train.training.sft \
+  --config configs/training/ufw-finemath-unreviewed-30k.toml \
+  --output artifacts/checkpoints/ufw-finemath-unreviewed-30k
+```
+
+Install the pinned base model first. The explicit download is separate
+from `scripts/download_resources.sh` so default public-resource setup
+does not require access to a private, unreviewed dataset. This recipe
+is directly loadable, not an audited training run.
 
 Point `training.overfit --suite` below at `<new-combined-suite>` once it
 contains 128 distinct train canonicals. The first audited batch may itself be

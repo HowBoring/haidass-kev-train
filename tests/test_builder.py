@@ -19,7 +19,10 @@ from transformers import PreTrainedTokenizerFast
 
 from haidass_kev_train.data.build import build
 from haidass_kev_train.data.canonical import load_canonical_suite
-from haidass_kev_train.data.packing import check_group_integrity, encode_record
+from haidass_kev_train.data.packing import check_group_integrity, encode_record, load_suite
+from haidass_kev_train.data.finemath import iter_rows as math_rows
+from haidass_kev_train.data.ufw import iter_rows as qa_rows
+
 
 
 EN = "The atlas lists the capital of Italy as Rome.\n\nQuestion: What is the capital of Italy? Answer: Rome\nQuestion: What is the capital of France? Answer: Paris"
@@ -130,6 +133,63 @@ class BuilderTests(unittest.TestCase):
         manifest = json.loads((self.root / "suite" / "manifest.json").read_text())
         self.assertFalse(manifest["complete"])  # a tiny trial with no required development coverage
         self.assertIn("files", manifest)
+
+    def test_frozen_jsonl_preserves_unicode_next_line_within_record(self):
+        suite = self.root / "unicode"
+        suite.mkdir()
+        payload = (json.dumps({"state": "before\u0085after"}, ensure_ascii=False) + "\n").encode()
+        (suite / "train.jsonl").write_bytes(payload)
+        (suite / "manifest.json").write_text(json.dumps({"files": {"train.jsonl": {
+            "sha256": hashlib.sha256(payload).hexdigest(), "records": 1}}}))
+        self.assertEqual(load_suite(suite)[0]["state"], "before\u0085after")
+
+    def test_shard_lanes_share_policy_but_read_disjoint_source_rows(self):
+        self.source("en", [("one", EN)])
+        pq.write_table(pa.Table.from_pylist([
+            {"uid": "two", "content": EN.replace("Italy", "Spain"), "style": "qa"}]),
+            Path(self.sources["ufw-en"]) / "part-00001.parquet")
+        replies = [{"distractors": DISTRACTORS},
+                   {"supported": True, "unique": True, "all_wrong": True, "same_format": True}]
+        self.build_with(replies, target=1, source_targets={"ufw-en": 1}, shard_count=2, shard_index=1)
+        with patch("urllib.request.urlopen", side_effect=[response(item) for item in replies]):
+            build(self.config(target=1, source_targets={"ufw-en": 1}, shard_count=2, shard_index=0),
+                  self.root / "other")
+        first = self.root / "suite"
+        other = self.root / "other"
+        self.assertEqual({row["_meta"]["source_ref"]["path"] for row in load_canonical_suite(first, "train") +
+                          load_canonical_suite(first, "development")}, {"ultrafineweb_en_l3/qa/part-00001.parquet"})
+        self.assertEqual({row["_meta"]["source_ref"]["path"] for row in load_canonical_suite(other, "train") +
+                          load_canonical_suite(other, "development")}, {"ultrafineweb_en_l3/qa/part-00000.parquet"})
+        self.assertEqual(json.loads((first / "manifest.json").read_text())["build"]["policy_sha256"],
+                         json.loads((other / "manifest.json").read_text())["build"]["policy_sha256"])
+
+    def test_more_lanes_than_shards_partition_original_rows(self):
+        self.source("en", [(f"e{i}", EN) for i in range(8)])
+        directory = self.root / "finemath-4plus"
+        directory.mkdir()
+        pq.write_table(pa.Table.from_pylist([
+            {"text": f"Question: What is {i}+1?\nAnswer: {i+1}",
+             "url": f"https://example.org/math/{i}", "snapshot_type": "latest"}
+            for i in range(8)]), directory / "part.parquet")
+        for iterator in (lambda lane: qa_rows(self.sources, lambda source: False,
+                                              shard_index=lane, shard_count=4),
+                         lambda lane: math_rows(directory, lambda: False,
+                                                shard_index=lane, shard_count=4)):
+            assigned = [[row[-2] for row in iterator(lane)] for lane in range(4)]
+            self.assertEqual(assigned, [[0, 4], [1, 5], [2, 6], [3, 7]])
+
+    def test_progress_reports_counts_without_source_material(self):
+        self.source("en", [("e1", EN)])
+        events = []
+        replies = [{"distractors": DISTRACTORS},
+                   {"supported": True, "unique": True, "all_wrong": True, "same_format": True}]
+        with patch("urllib.request.urlopen", side_effect=[response(item) for item in replies]):
+            build(self.config(target=1, source_targets={"ufw-en": 1}),
+                  self.root / "progress", progress=events.append)
+        self.assertEqual(events[-1]["accepted"], 1)
+        self.assertEqual(events[-1]["attempts"], 2)
+        self.assertEqual(events[-1]["source"], "ufw-en")
+        self.assertNotIn(EN, json.dumps(events))
 
     def test_rejected_selected_qa_is_not_replaced(self):
         self.source("en", [("one", EN)])

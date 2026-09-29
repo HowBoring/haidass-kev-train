@@ -294,14 +294,24 @@ def prepare(chosen, ask):
     return {**chosen, "question": question}
 
 
-def iter_rows(sources, finished):
-    """Stream local original qa Parquet row batches; line is a zero-based per-shard locator."""
+def lane_shards(shards, shard_index, shard_count):
+    """Partition files first, then partition rows if there are more lanes than files."""
+    file_lanes = min(len(shards), shard_count)
+    slot = shard_index % file_lanes
+    stripe = shard_index // file_lanes
+    stripes = (shard_count - 1 - slot) // file_lanes + 1
+    return shards[slot::file_lanes], stripe, stripes
+
+
+def iter_rows(sources, finished, *, shard_index=0, shard_count=1):
+    """Stream original QA shards assigned to one disjoint lane; line is per-shard."""
     for source, directory in sorted(sources.items()):
         language = source.split("-")[-1]
         shards = sorted(Path(directory).glob("*.parquet"))
         if not shards:
             raise FileNotFoundError(f"No original QA Parquet shards under {directory}")
-        for shard in shards:
+        assigned, stripe, stripes = lane_shards(shards, shard_index, shard_count)
+        for shard in assigned:
             if finished(source):
                 break
             for line, batch in enumerate_batches(shard):
@@ -310,7 +320,8 @@ def iter_rows(sources, finished):
                 for offset, row in enumerate(batch):
                     if finished(source):
                         break
-                    yield source, language, shard.name, line + offset, row
+                    if (line + offset) % stripes == stripe:
+                        yield source, language, shard.name, line + offset, row
 
 
 def enumerate_batches(shard):

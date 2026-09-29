@@ -52,13 +52,17 @@ uv run --no-sync python -c 'import torch; print(torch.cuda.get_device_capability
 
 CUDA setup is complete when the second command prints `(12, 0)`.
 
-Download pinned model and dataset resources with:
+Download the pinned base model and public legacy datasets with:
 
 ```bash
 scripts/download_resources.sh
 ```
 
 For constrained internet access, set `HF_ENDPOINT` before invoking the script. Hugging Face operations must follow `.agents/skills/hf-cli/SKILL.md`.
+
+The private unreviewed UFW–FineMath canonical suite is not downloaded by
+this public-resource script; use the pinned `hf download` command in
+`docs/agents/training.md` after authenticating with organization access.
 
 ## Dependency changes
 

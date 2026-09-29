@@ -375,7 +375,7 @@ def load_suite(path, split: str = "train", *, validate=None) -> list[dict]:
     expected = (entries[name] or {}).get("sha256")
     if digest != expected:
         raise ValueError(f"{path}/{name}: sha256 {digest} does not match manifest {expected}")
-    records = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+    records = [json.loads(line) for line in raw.decode("utf-8").split("\n") if line.strip()]
     declared = (entries[name] or {}).get("records")
     if declared is not None and len(records) != declared:
         raise ValueError(f"{path}/{name}: {len(records)} records, manifest declares {declared}")

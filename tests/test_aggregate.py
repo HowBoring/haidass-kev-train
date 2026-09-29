@@ -14,7 +14,7 @@ import test_builder as builder_fixture
 import test_quality_gate as fixture
 import test_overfit_recipe as recipe_fixture
 from transformers import AutoTokenizer
-from haidass_kev_train.data.aggregate import aggregate
+from haidass_kev_train.data.aggregate import aggregate, main
 from haidass_kev_train.data.build import _split, build
 from haidass_kev_train.data.canonical import load_canonical_suite
 from haidass_kev_train.data.finemath import group_id as math_group
@@ -40,14 +40,19 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(quality_gate(suite, review, assessments, quality)["status"], "pass")
         return suite, review, assessments, quality
 
-    def later_batch(self, audited, *, duplicate=False):
-        """Build another capped batch over offset rows, optionally repeating one original input."""
+    def later_batch(self, audited, *, duplicate=False, split_seed=None, lane=None):
+        """Build another capped batch over offset rows or a disjoint second shard lane."""
         manifest = json.loads((audited / "manifest.json").read_text())
         config = manifest["build"]["config"]
         summary = json.loads((audited / "summary.json").read_text())
-        offsets = {source: summary["scanned_by_source"].get(source, 0) for source in config["sources"]}
+        offsets = {source: 0 if lane is not None else summary["scanned_by_source"].get(source, 0)
+                   for source in config["sources"]}
         config["source_start_rows"] = offsets
-        config["seed"] = 18  # selection seed differs; policy and split_seed remain fixed.
+        config["seed"] = 18  # Selection seed may differ without changing the audited policy.
+        if split_seed is not None:
+            config["split_seed"] = split_seed
+        if lane is not None:
+            config["shard_index"] = lane
         math_numbers = list(range(40, 80))
         if not any(_split(config["split_seed"], math_group("finemath", f"https://example.org/math/{n}", "")) == "development"
                    for n in math_numbers):
@@ -74,13 +79,19 @@ class AggregateTests(unittest.TestCase):
             old = pq.read_table(source_file)
             new = pa.Table.from_pylist([{"uid": f"{language[0]}{n}", "style": "qa", "content": text(n)}
                                         for n in numbers], schema=old.schema)
-            pq.write_table(pa.concat_tables([old, new]), source_file)
+            if lane is None:
+                pq.write_table(pa.concat_tables([old, new]), source_file)
+            else:
+                pq.write_table(new, source_file.with_name("zz.parquet"))
         math_file = Path(config["sources"]["finemath"]) / "part.parquet"
         old = pq.read_table(math_file)
         new = pa.Table.from_pylist([{"text": f"Question: What is {n}+1?\nAnswer: {n+1}",
                                      "url": f"https://example.org/math/{n}", "snapshot_type": "latest"}
                                     for n in math_numbers], schema=old.schema)
-        pq.write_table(pa.concat_tables([old, new]), math_file, row_group_size=16)
+        if lane is None:
+            pq.write_table(pa.concat_tables([old, new]), math_file, row_group_size=16)
+        else:
+            pq.write_table(new, math_file.with_name("zz.parquet"), row_group_size=16)
 
         calls = 0
         def http(request, timeout):
@@ -128,6 +139,14 @@ class AggregateTests(unittest.TestCase):
         train, development, probe = _canonical_data(config, AutoTokenizer.from_pretrained(self.tokenizer))
         self.assertEqual((len(train), len(probe), len(development)),
                          (128, 640, 5 * len(load_canonical_suite(output, "development"))))
+
+    def test_batch_split_seed_must_match_audited_suite(self):
+        audited, review, assessments, quality = self.audited()
+        later = self.later_batch(audited, split_seed=3)
+        output = self.root / "wrong-seed"
+        with self.assertRaisesRegex(ValueError, "split_seed"):
+            aggregate([later], quality, audited, review, assessments, 1, output)
+        self.assertFalse(output.exists())
 
     def test_repeated_original_row_collapses_with_first_locator_but_conflicting_supervision_fails(self):
         audited, review, assessments, quality = self.audited()
@@ -200,6 +219,96 @@ class AggregateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             aggregate([audited, later], quality, audited, review, assessments, 128, output)
         self.assertFalse(output.exists())
+
+    def test_unreviewed_merge_marks_not_reviewed_without_fake_audit_provenance(self):
+        first, _, _ = self.trial(100)
+        later = self.later_batch(first)
+        output = self.root / "unreviewed"
+        report = aggregate([first, later], None, None, None, None, 128, output, unreviewed=True)
+        self.assertEqual(report["quality_status"], "not_reviewed")
+        self.assertEqual(report["input_accepted"], 200)
+        self.assertGreaterEqual(report["counts"]["train"]["records"], 128)
+        audit_keys = {"audited_batch_manifest_sha256", "quality_report", "quality_report_sha256",
+                      "review_sha256", "assessments_sha256"}
+        self.assertTrue(audit_keys.isdisjoint(report))
+        self.assertEqual(report["policy_sha256"],
+                         json.loads((first / "manifest.json").read_text())["build"]["policy_sha256"])
+        manifest = json.loads((output / "manifest.json").read_text())
+        self.assertEqual(manifest["aggregation"]["quality_status"], "not_reviewed")
+        self.assertTrue(audit_keys.isdisjoint(manifest["aggregation"]))
+        self.assertEqual(len(manifest["aggregation"]["batch_manifests"]), 2)
+        self.assertFalse(any(check_group_integrity(output, ("train", "development"))["overlaps"].values()))
+
+    def test_unreviewed_rejects_evidence_and_policy_seed_or_completeness_drift(self):
+        audited, review, assessments, quality = self.audited()
+        later = self.later_batch(audited)
+        output = self.root / "blocked-unreviewed"
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            aggregate([audited], quality, audited, review, assessments, 1, output, unreviewed=True)
+        with self.assertRaisesRegex(ValueError, "audited aggregation requires"):
+            aggregate([audited], None, None, None, None, 1, output)
+        manifest_path = later / "manifest.json"
+        original = manifest_path.read_bytes()
+        manifest = json.loads(original)
+        manifest["build"]["config"]["split_seed"] = 3
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "split_seed"):
+            aggregate([audited, later], None, None, None, None, 1, output, unreviewed=True)
+        manifest_path.write_bytes(original)
+        self.assertFalse(output.exists())
+        manifest["build"]["model"] = manifest["build"]["policy"]["model"] = "forged-model"
+        manifest["build"]["policy_sha256"] = hashlib.sha256(json.dumps(
+            manifest["build"]["policy"], ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "generation strategy"):
+            aggregate([audited, later], None, None, None, None, 1, output, unreviewed=True)
+        self.assertFalse(output.exists())
+        manifest = json.loads(original)
+        manifest["complete"] = False
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "unfinished"):
+            aggregate([audited, later], None, None, None, None, 1, output, unreviewed=True)
+        self.assertFalse(output.exists())
+
+    def test_unreviewed_disjoint_lanes_merge_at_offset_zero_and_wrong_lane_fails(self):
+        first, _, _ = self.trial(100, shard_count=2)
+        lane1 = self.later_batch(first, lane=1)
+        manifest_path = first / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        output = self.root / "lanes"
+        report = aggregate([first, lane1], None, None, None, None, 128, output, unreviewed=True)
+        self.assertEqual(report["quality_status"], "not_reviewed")
+        self.assertEqual((report["input_accepted"], report["duplicate_canonicals_collapsed"]), (200, 0))
+        self.assertEqual({(m["shard_count"], m["shard_index"]) for m in report["batch_manifests"]},
+                         {(2, 0), (2, 1)})
+        self.assertTrue(all(not any(m["source_start_rows"].values())
+                            for m in report["batch_manifests"]))
+        self.assertFalse(any(check_group_integrity(output, ("train", "development"))["overlaps"].values()))
+        manifest["build"]["config"]["shard_index"] = 1  # Original records belong to lane 0.
+        manifest_path.write_text(json.dumps(manifest))
+        blocked = self.root / "wrong-lane"
+        with self.assertRaisesRegex(ValueError, "outside lane"):
+            aggregate([first, lane1], None, None, None, None, 1, blocked, unreviewed=True)
+        self.assertFalse(blocked.exists())
+        manifest["build"]["config"]["shard_index"] = 0
+        manifest_path.write_text(json.dumps(manifest))
+        lane1_path = lane1 / "manifest.json"
+        lane1_manifest = json.loads(lane1_path.read_text())
+        lane1_manifest["build"]["config"]["shard_count"] = 3
+        lane1_path.write_text(json.dumps(lane1_manifest))
+        with self.assertRaisesRegex(ValueError, "shard_count"):
+            aggregate([first, lane1], None, None, None, None, 1, blocked, unreviewed=True)
+        self.assertFalse(blocked.exists())
+
+    def test_cli_unreviewed_omits_evidence_while_audited_default_still_requires_it(self):
+        base = ["--batch", "missing-batch", "--minimum-train", "1", "--output", str(self.root / "cli")]
+        with self.assertRaises(SystemExit):  # Audited default keeps the four evidence args required.
+            main(base)
+        with self.assertRaises(SystemExit):  # Evidence must not be mixed into an unreviewed merge.
+            main(base + ["--unreviewed", "--quality", "quality.json"])
+        with self.assertRaises(FileNotFoundError):  # Parser accepted omitted evidence; merge starts.
+            main(base + ["--unreviewed"])
 
 
 if __name__ == "__main__":

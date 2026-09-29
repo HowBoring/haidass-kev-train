@@ -13,3 +13,10 @@ include = ["v4/decision-v4/*", "v6/decision-v6/*", "v7/decision-v7/*", "v4/trans
 repo_id = "LocalLLaMA/typed-decisions"
 revision = "ea9306458d6e9563628369a3d1e72e362fb381d2"
 local_dir = "data/raw/typed-decisions"
+
+# Private, unreviewed; download explicitly when training on this suite.
+[data.ufw_finemath_unreviewed_30k]
+repo_id = "DALabCommunity/haidass-kev-ufw-finemath-unreviewed-30k"
+revision = "0acdeaa17d9e90e40dfaaca23449c591ba7369c7"
+local_dir = "data/raw/haidass-kev-ufw-finemath-unreviewed-30k"
+include = ["manifest.json", "train.jsonl", "development.jsonl", "training.toml", "README.md"]

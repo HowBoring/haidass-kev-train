@@ -168,6 +168,79 @@ class FineMathBuilderTests(unittest.TestCase):
         self.assertEqual(report["rejected"]["missing_source_answer"], 1)
         self.assertEqual((report["attempts"], requests, self.cases()), (0, [], []))
 
+    def test_boxed_solution_answer_recovers_source_grounded_candidate(self):
+        text = ("Daily problem\n"
+                "Compute 17 + 25.\n"
+                "Solution: Adding the numbers gives 42, so the result is $\\boxed{42}$.")
+        self.source([(text, "https://example.org/boxed", "latest")])
+        reply = {"complete": True, "question_text": "Compute 17 + 25.",
+                 "answer_text": "42", "answer_evidence": "$\\boxed{42}$", "reason": "explicit boxed answer"}
+        report, requests = self.run_builder([reply, {"distractors": NUMBERS}])
+        self.assertEqual(report["accepted"], 1)
+        case = self.cases()[0]
+        self.assertEqual((case["state"], case["question"], case["gold"]), ("", "Compute 17 + 25.", "42"))
+        ref = case["_meta"]["source_ref"]
+        self.assertEqual(text[slice(*ref["question_span"])], "Compute 17 + 25.")
+        self.assertEqual(text[slice(*ref["answer_span"])], "42")
+        locate = requests[0]
+        self.assertEqual(locate["response_format"]["type"], "json_schema")
+        self.assertTrue(locate["chat_template_kwargs"]["enable_thinking"])
+
+    def test_unlabelled_final_answer_cue_recovers_source_grounded_candidate(self):
+        text = ("Calculate 17 + 25.\n"
+                "Adding the numbers gives 42. The answer is 42.")
+        self.source([(text, "https://example.org/answer-is", "latest")])
+        reply = {"complete": True, "question_text": "Calculate 17 + 25.",
+                 "answer_text": "42", "answer_evidence": "The answer is 42", "reason": "explicit final answer"}
+        report, requests = self.run_builder([reply, {"distractors": NUMBERS}])
+        self.assertEqual(report["accepted"], 1)
+        case = self.cases()[0]
+        self.assertEqual((case["question"], case["gold"]), ("Calculate 17 + 25.", "42"))
+        ref = case["_meta"]["source_ref"]
+        self.assertEqual(text[slice(*ref["question_span"])], "Calculate 17 + 25.")
+        self.assertEqual(text[slice(*ref["answer_span"])], "42")
+        self.assertEqual(requests[0]["response_format"]["type"], "json_schema")
+
+    def test_boxed_recovery_rejects_inexact_or_detached_answer_quotes(self):
+        text = ("Calculate 17 + 25.\n"
+                "Solution: Adding the numbers gives 42, so the result is $\\boxed{42}$.")
+        self.source([(text, "https://example.org/inexact-question", "latest"),
+                     (text, "https://example.org/inexact-evidence", "latest"),
+                     (text, "https://example.org/answer-outside-evidence", "latest"),
+                     (text, "https://example.org/option-only", "latest")])
+        replies = [
+            {"complete": True, "question_text": "Calculate 17+25.",
+             "answer_text": "42", "answer_evidence": "$\\boxed{42}$", "reason": "paraphrased question"},
+            {"complete": True, "question_text": "Calculate 17 + 25.",
+             "answer_text": "42", "answer_evidence": "the answer is 42", "reason": "invented evidence"},
+            {"complete": True, "question_text": "Calculate 17 + 25.",
+             "answer_text": "43", "answer_evidence": "$\\boxed{42}$", "reason": "answer not in evidence"},
+            {"complete": True, "question_text": "Calculate 17 + 25.",
+             "answer_text": "B", "answer_evidence": "$\\boxed{42}$", "reason": "option letter only"},
+        ]
+        report, requests = self.run_builder(replies)
+        self.assertEqual(report["rejected"]["invalid_source_location"], 2)
+        self.assertEqual(report["rejected"]["invalid_source_answer"], 2)
+        self.assertEqual((report["attempts"], len(requests), self.cases()), (4, 4, []))
+
+    def test_boxed_recovery_rejects_ambiguous_incomplete_and_figure_pages(self):
+        repeated = ("Calculate 17 + 25.\nCalculate 17 + 25.\n"
+                    "Solution: the result is $\\boxed{42}$.")
+        ambiguous = {"complete": True, "question_text": "Calculate 17 + 25.",
+                     "answer_text": "42", "answer_evidence": "$\\boxed{42}$", "reason": "duplicated question"}
+        refused = {"complete": False, "question_text": None, "answer_text": None,
+                   "answer_evidence": None, "reason": "no self-contained question"}
+        figure = ("Calculate the area shown in the diagram.\n"
+                  "Solution: the result is $\\boxed{42}$.")
+        self.source([(repeated, "https://example.org/ambiguous", "latest"),
+                     (repeated, "https://example.org/refused", "latest"),
+                     (figure, "https://example.org/figure", "latest")])
+        report, requests = self.run_builder([ambiguous, refused])
+        self.assertEqual(report["rejected"]["invalid_source_location"], 1)
+        self.assertEqual(report["rejected"]["incomplete_problem"], 1)
+        self.assertEqual(report["rejected"]["missing_figure_or_conditions"], 1)
+        self.assertEqual((report["attempts"], len(requests), self.cases()), (2, 2, []))
+
     def test_assisted_location_is_original_and_thinking_enabled(self):
         text = "Question: Find the result of 1+1?\nAnswer: 2\nAdditional unrelated footer"
         self.source([(text, "https://example.org/3?v=2", "latest")])
@@ -179,6 +252,19 @@ class FineMathBuilderTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(req["chat_template_kwargs"]["enable_thinking"] for req in requests))
         self.assertEqual(self.cases()[0]["gold"], "2")
+
+    def test_assisted_schema_retries_wrong_span_type_then_refuses(self):
+        text = "Question: Find 1+1?\nAnswer: 2\nUnrelated footer"
+        self.source([(text, "https://example.org/invalid-offset", "latest")])
+        report, _ = self.run_builder([
+            {"question_span": [True, text.index("?") + 1],
+             "answer_span": [text.index("2"), text.index("2") + 1], "complete": True},
+            {"question_span": None, "answer_span": None, "complete": False},
+        ])
+        self.assertEqual(report["attempts"], 2)
+        self.assertEqual(report["failures"]["malformed_response"], 1)
+        self.assertEqual(report["rejected"]["incomplete_problem"], 1)
+        self.assertEqual(self.cases(), [])
 
     def test_assisted_offsets_cannot_promote_solution_to_source_answer_or_question(self):
         text = "Question: Find 1+1?\nSolution: 2\nAnswer: 2\nFooter"

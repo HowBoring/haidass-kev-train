@@ -55,6 +55,7 @@ def _policy_identity(config, build_details):
         "source_location": build_details["source_location"],
         "sources": {source: str(Path(directory).resolve())
                     for source, directory in sorted(config["sources"].items())},
+        "shard_count": config["shard_count"],
         "tokenizer_sha256": build_details["tokenizer_sha256"],
         "generator_tokenizer_sha256": build_details["generator_tokenizer_sha256"],
         "limits": {name: config[name] for name in ("max_packed", "max_answer_tokens",
@@ -73,9 +74,9 @@ def _valid_config(config, output):
     if not isinstance(config, dict):
         raise ValueError("build config must be a table")
     allowed = {"sources", "tokenizer_path", "generator_tokenizer_path", "seed", "split_seed",
-               "target", "source_targets", "source_start_rows", "max_attempts", "max_seconds",
-               "timeout", "max_packed", "max_answer_tokens", "max_source_tokens",
-               "max_context_tokens", "max_output_tokens", "api_key_env"}
+               "target", "source_targets", "source_start_rows", "shard_count", "shard_index",
+               "max_attempts", "max_seconds", "timeout", "max_packed", "max_answer_tokens",
+               "max_source_tokens", "max_context_tokens", "max_output_tokens", "api_key_env"}
     if set(config) - allowed:
         raise ValueError(f"unknown build configuration keys: {sorted(set(config) - allowed)}")
     sources = config.get("sources")
@@ -106,6 +107,11 @@ def _valid_config(config, output):
     config.setdefault("split_seed", config["seed"])
     if not isinstance(config["split_seed"], int) or isinstance(config["split_seed"], bool):
         raise ValueError("split_seed must be an integer")
+    config.setdefault("shard_count", 1)
+    config.setdefault("shard_index", 0)
+    if (type(config["shard_count"]) is not int or config["shard_count"] < 1 or
+            type(config["shard_index"]) is not int or not 0 <= config["shard_index"] < config["shard_count"]):
+        raise ValueError("shard_index must be in [0, shard_count) with positive shard_count")
     targets = config.setdefault("source_targets", {source: (40 if source == "finemath" else 30) for source in sources})
     if not isinstance(targets, dict) or set(targets) != set(sources) or any(
             isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in targets.values()):
@@ -217,12 +223,15 @@ def _valid_math_adjudication(result):
 
 
 def _source_rows(config, finished):
+    shard_index, shard_count = config["shard_index"], config["shard_count"]
     for source, directory in sorted(config["sources"].items()):
         if source == "finemath":
-            for shard, line, row in math_rows(directory, lambda: finished(source)):
+            for shard, line, row in math_rows(directory, lambda: finished(source),
+                                              shard_index=shard_index, shard_count=shard_count):
                 yield source, None, shard, line, row
         else:
-            yield from iter_rows({source: directory}, lambda name: finished(name))
+            yield from iter_rows({source: directory}, lambda name: finished(name),
+                                 shard_index=shard_index, shard_count=shard_count)
 
 
 def _split(seed, group_id):
@@ -312,7 +321,7 @@ def _publish(output, records, report, config):
         os.rename(staging, output)
 
 
-def build(config: dict, output: str | Path) -> dict:
+def build(config: dict, output: str | Path, *, progress=None) -> dict:
     """Stream original UFW QA and FineMath webpages into a frozen canonical suite.
 
     A partial/failed trial still publishes verified eligible records, marked incomplete.
@@ -331,6 +340,8 @@ def build(config: dict, output: str | Path) -> dict:
         raise ValueError("generator tokenizer must provide a Qwen chat template with role delimiters")
     generator = Generator(config, generator_tokenizer)
     started = time.monotonic()
+    current_source = None
+    last_progress = started
     accepted_by_source: Counter[str] = Counter()
     skipped_by_offset: Counter[str] = Counter()
     report: dict[str, Any] = {"scanned": 0, "accepted": 0, "duplicates": 0, "rejected": Counter(),
@@ -338,6 +349,13 @@ def build(config: dict, output: str | Path) -> dict:
               "skipped_by_offset": skipped_by_offset,
               "program_relations": Counter(), "unknown_cases": 0, "program_rejected": 0,
               "llm_accepted": 0, "llm_rejected": 0, "stop_reason": "source_exhausted"}
+    def emit_progress():
+        if progress is not None:
+            progress({"source": current_source, "elapsed_seconds": round(time.monotonic() - started, 1),
+                      "scanned": report["scanned"], "skipped": sum(skipped_by_offset.values()),
+                      "accepted": report["accepted"], "attempts": generator.attempts,
+                      "accepted_by_source": dict(accepted_by_source),
+                      "rejected": dict(report["rejected"]), "failures": dict(generator.failures)})
     records = []
     lengths = []
     output_parent = Path(output).parent
@@ -349,6 +367,11 @@ def build(config: dict, output: str | Path) -> dict:
     try:
         for source, language, shard, line, row in _source_rows(
                 config, lambda name: accepted_by_source[name] >= config["source_targets"][name]):
+            current_source = source
+            now = time.monotonic()
+            if progress is not None and now - last_progress >= 10:
+                emit_progress()
+                last_progress = now
             if skipped_by_offset[source] < config["source_start_rows"][source]:
                 generator.check()
                 skipped_by_offset[source] += 1
@@ -533,6 +556,7 @@ def build(config: dict, output: str | Path) -> dict:
     report["packed_tokens"] = ({"min": min(lengths), "median": statistics.median(lengths),
                                 "p95": sorted(lengths)[math.ceil(0.95 * len(lengths)) - 1],
                                 "max": max(lengths)} if lengths else None)
+    emit_progress()
     _publish(output, records, report, config)
     return report
 

@@ -1,6 +1,8 @@
-"""Offline merge of separately authorized, completed builder batches under one audited policy.
+"""Offline merge of separately authorized, completed builder batches under one generation policy.
 
-Does not generate records, perform human review, start training, or authorize resources.
+Audited mode verifies the source-backed 100-case human audit; --unreviewed skips only that
+audit and marks the result not_reviewed. Neither mode generates records, performs human
+review, starts training, or authorizes resources.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import tempfile
 from haidass_kev_train.data.build import _split
 from haidass_kev_train.data.canonical import load_canonical_suite
 from haidass_kev_train.data.finemath import group_id as math_group
-from haidass_kev_train.data.ufw import digest
+from haidass_kev_train.data.ufw import digest, lane_shards
 from haidass_kev_train.data.quality import _identity, quality_gate
 
 SOURCES = frozenset(("ufw-en", "ufw-zh", "finemath"))
@@ -52,40 +54,59 @@ def _without_locator(row):
 
 def aggregate(batches: list[str | Path], quality_report: str | Path, audited_suite: str | Path,
               review: str | Path, assessments: str | Path, minimum_train: int,
-              output: str | Path) -> dict:
+              output: str | Path, *, unreviewed: bool = False) -> dict:
     """Verify the source-backed 100-case audit and merge complete frozen batches.
 
     `minimum_train` is a predeclared minimum, not a quota that discards extra cases.
     Every source batch keeps its own <=100 admission limit; aggregation does not
     authorize another batch, and insufficient coverage fails without publishing.
+
+    With `unreviewed=True` the four audit evidence arguments MUST be None: no human
+    audit is claimed or performed, the result is marked quality_status "not_reviewed",
+    and no audited hashes or quality report are recorded. Batch identity, policy,
+    split_seed, offset, count and dedup verification still apply unchanged.
     """
-    quality_report, audited_suite, review, assessments, output = map(
-        Path, (quality_report, audited_suite, review, assessments, output))
+    output = Path(output)
+    evidence = (quality_report, audited_suite, review, assessments)
+    if unreviewed:
+        if any(item is not None for item in evidence):
+            raise ValueError("unreviewed aggregation cannot carry human audit evidence")
+    elif any(item is None for item in evidence):
+        raise ValueError("audited aggregation requires quality report, audited suite, review and assessments")
+    else:
+        quality_report, audited_suite, review, assessments = map(Path, evidence)
     if output.exists():
         raise FileExistsError(f"aggregate suite already exists: {output}")
     if type(minimum_train) is not int or minimum_train < 1:
         raise ValueError("minimum_train must be a positive integer")
     if not batches:
         raise ValueError("at least one completed source batch is required")
-    claimed = json.loads(quality_report.read_text(encoding="utf-8"))
-    with tempfile.TemporaryDirectory() as directory:
-        observed = quality_gate(audited_suite, review, assessments, Path(directory) / "quality.json")
-    if ({k: value for k, value in claimed.items() if k != "report_path"} !=
-            {k: value for k, value in observed.items() if k != "report_path"} or
-            observed["status"] != "pass" or
-            not (observed["audited"] == observed["required_audited"] == 100) or
-            observed["severe_count"] != 0):
-        raise ValueError("source-backed audit of all 100 cases with zero severe errors is required")
-
+    expected_policy = None
+    split_seed = None
+    observed = None
+    if not unreviewed:
+        claimed = json.loads(quality_report.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            observed = quality_gate(audited_suite, review, assessments, Path(directory) / "quality.json")
+        if ({k: value for k, value in claimed.items() if k != "report_path"} !=
+                {k: value for k, value in observed.items() if k != "report_path"} or
+                observed["status"] != "pass" or
+                not (observed["audited"] == observed["required_audited"] == 100) or
+                observed["severe_count"] != 0):
+            raise ValueError("source-backed audit of all 100 cases with zero severe errors is required")
+        expected_policy = observed["policy_sha256"]
+        split_seed = _identity(audited_suite)[0]["build"]["config"].get("split_seed")
+        if type(split_seed) is not int:
+            raise ValueError("audited suite must have a frozen split_seed")
     collected = {"train": {}, "development": {}}
     group_split = {}
     source_rows = {}
-    scanned_ranges = {source: [] for source in SOURCES}
+    scanned_ranges = {}
     provenance = []
     total_input = 0
     seen_batches = set()
-    split_seed = None
     build = None
+    lane_count = None
     for path in map(Path, batches):
         path = path.resolve()
         manifest, manifest_sha, policy = _identity(path)
@@ -94,15 +115,31 @@ def aggregate(batches: list[str | Path], quality_report: str | Path, audited_sui
         if manifest_sha in seen_batches:
             raise ValueError(f"{path}: duplicate input batch manifest")
         seen_batches.add(manifest_sha)
-        if policy != observed["policy_sha256"]:
-            raise ValueError(f"{path}: generation strategy differs from the audited policy")
+        if expected_policy is None:
+            expected_policy = policy  # Unreviewed: first batch defines the common generation strategy.
+        elif policy != expected_policy:
+            raise ValueError(f"{path}: generation strategy differs across batches" if unreviewed else
+                             f"{path}: generation strategy differs from the audited policy")
         if manifest.get("complete") is not True:
             raise ValueError(f"{path}: unfinished builder batch cannot be aggregated")
         config = manifest["build"]["config"]
         seed = config.get("split_seed")
-        if type(seed) is not int or split_seed is not None and seed != split_seed:
-            raise ValueError(f"{path}: split_seed differs across builder batches")
-        split_seed = seed
+        if type(seed) is not int or (split_seed is not None and seed != split_seed):
+            raise ValueError(f"{path}: split_seed differs across batches or is missing" if unreviewed else
+                             f"{path}: split_seed differs from audited suite")
+        if split_seed is None:
+            split_seed = seed
+        shard_count, shard_index = config.get("shard_count", 1), config.get("shard_index", 0)
+        if (type(shard_count) is not int or shard_count < 1 or
+                type(shard_index) is not int or not 0 <= shard_index < shard_count):
+            raise ValueError(f"{path}: invalid shard_count/shard_index lane in build config")
+        if manifest["build"]["policy"].get("shard_count", 1) != shard_count:
+            raise ValueError(f"{path}: shard_count differs from frozen generation policy")
+        if lane_count is None:
+            lane_count = shard_count
+        elif shard_count != lane_count:
+            raise ValueError(f"{path}: shard_count differs across batches")
+        assigned_shards = {}
         if build is None:
             build = manifest["build"]  # Representative source batch; quotas and offsets are NOT aggregate totals.
         current = {split: load_canonical_suite(path, split) for split in collected}
@@ -136,11 +173,11 @@ def aggregate(batches: list[str | Path], quality_report: str | Path, audited_sui
                     count and actual_skip != start):
                 raise ValueError(f"{path}: invalid source scan interval for {source}")
             end = start + count
-            if count and any(max(start, before) < min(end, after)
-                             for before, after in scanned_ranges[source]):
-                raise ValueError(f"{path}: overlapping authorized source scan interval for {source}")
+            lane = scanned_ranges.setdefault((source, shard_index), [])
+            if count and any(max(start, before) < min(end, after) for before, after in lane):
+                raise ValueError(f"{path}: overlapping authorized source scan interval for {source} lane {shard_index}")
             if count:
-                scanned_ranges[source].append((start, end))
+                lane.append((start, end))
         for split, rows in current.items():
             for row in rows:
                 meta = row["_meta"]
@@ -153,6 +190,17 @@ def aggregate(batches: list[str | Path], quality_report: str | Path, audited_sui
                 if prior_split != split:
                     raise ValueError(f"{group}: Source Group spans train and development")
                 ref = meta["source_ref"]
+                shards = assigned_shards.get(row["source"])
+                if shards is None:
+                    files = sorted(Path(config["sources"][row["source"]]).glob("*.parquet"))
+                    if not files:
+                        raise ValueError(f"{path}: missing source shards for {row['source']}")
+                    assigned, stripe, stripes = lane_shards(files, shard_index, shard_count)
+                    shards = assigned_shards[row["source"]] = {
+                        shard.name: (stripe, stripes) for shard in assigned}
+                location = shards.get(Path(ref["path"]).name)
+                if location is None or ref["line"] % location[1] != location[0]:
+                    raise ValueError(f"{path}: {rid} source row is outside lane {shard_index}/{shard_count}")
                 source_row = (row["source"], ref["path"], ref["line"], ref["sha256"])
                 prior_id = source_rows.setdefault(source_row, rid)
                 if prior_id != rid:
@@ -167,7 +215,8 @@ def aggregate(batches: list[str | Path], quality_report: str | Path, audited_sui
                     collected[split][rid] = row  # Keep the first verified source row locator.
         provenance.append({"suite": str(path), "manifest_sha256": manifest_sha,
                            "summary_sha256": _sha(summary_path), "accepted": accepted,
-                           "split_seed": seed, "source_start_rows": offsets,
+                           "split_seed": seed, "shard_count": shard_count, "shard_index": shard_index,
+                           "source_start_rows": offsets,
                            "scanned_by_source": scanned, "skipped_by_offset": skipped,
                            "counts": counts})
     if len(collected["train"]) < minimum_train:
@@ -183,15 +232,18 @@ def aggregate(batches: list[str | Path], quality_report: str | Path, audited_sui
               for split, rows in collected.items()}
     distinct_accepted = len(collected["train"]) + len(collected["development"])
     aggregation = {"batch_manifests": provenance,
-                   "audited_batch_manifest_sha256": observed["batch_manifest_sha256"],
-                   "quality_report": str(quality_report.resolve()),
-                   "quality_report_sha256": _sha(quality_report),
-                   "review_sha256": _sha(review), "assessments_sha256": _sha(assessments),
-                   "policy_sha256": observed["policy_sha256"], "split_seed": split_seed,
+                   "policy_sha256": expected_policy, "split_seed": split_seed,
                    "minimum_train": minimum_train, "input_accepted": total_input,
                    "distinct_accepted": distinct_accepted,
                    "duplicate_canonicals_collapsed": total_input - distinct_accepted,
                    "counts": counts}
+    if unreviewed:
+        aggregation["quality_status"] = "not_reviewed"  # Explicit: no human review occurred.
+    else:
+        aggregation.update(audited_batch_manifest_sha256=observed["batch_manifest_sha256"],
+                           quality_report=str(quality_report.resolve()),
+                           quality_report_sha256=_sha(quality_report),
+                           review_sha256=_sha(review), assessments_sha256=_sha(assessments))
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as directory:
         staging = Path(directory)
@@ -212,11 +264,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch", action="append", required=True,
                         help="separately authorized completed original builder suite; repeat per batch")
-    for key in ("quality", "audited-suite", "review", "assessments", "minimum-train", "output"):
-        parser.add_argument(f"--{key}", required=True, type=int if key == "minimum-train" else str)
+    parser.add_argument("--unreviewed", action="store_true",
+                        help="merge without human audit evidence; the result is marked not_reviewed")
+    for key in ("quality", "audited-suite", "review", "assessments"):
+        parser.add_argument(f"--{key}", help="required unless --unreviewed")
+    parser.add_argument("--minimum-train", required=True, type=int)
+    parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    print(json.dumps(aggregate(args.batch, args.quality, args.audited_suite, args.review,
-                               args.assessments, args.minimum_train, args.output), indent=2))
+    evidence = (args.quality, args.audited_suite, args.review, args.assessments)
+    if args.unreviewed and any(evidence):
+        parser.error("--unreviewed must not be combined with audit evidence arguments")
+    if not args.unreviewed and not all(evidence):
+        parser.error("audited aggregation requires --quality, --audited-suite, --review and --assessments")
+    print(json.dumps(aggregate(args.batch, *evidence, args.minimum_train, args.output,
+                               unreviewed=args.unreviewed), indent=2))
 
 
 if __name__ == "__main__":

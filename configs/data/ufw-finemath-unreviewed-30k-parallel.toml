@@ -1,0 +1,30 @@
+seed = 42
+split_seed = 42
+target = 100
+max_attempts = 2000
+max_seconds = 14400
+timeout = 90
+tokenizer_path = "models/base/haidass1.5-143m"
+generator_tokenizer_path = "/mnt/models/MODELS/Qwen3.8-27B"
+max_packed = 1024
+max_answer_tokens = 32
+max_source_tokens = 8192
+max_context_tokens = 32768
+max_output_tokens = 1024
+shard_count = 64
+shard_index = 0
+
+[sources]
+ufw-en = "/mnt/data/Ultra-FineWeb-L3/data/ultrafineweb_en_l3/qa"
+ufw-zh = "/mnt/data/Ultra-FineWeb-L3/data/ultrafineweb_zh_l3/qa"
+finemath = "/mnt/data/finemath-4plus/finemath-4plus"
+
+[source_targets]
+ufw-en = 47
+ufw-zh = 48
+finemath = 5
+
+[source_start_rows]
+ufw-en = 0
+ufw-zh = 0
+finemath = 0
